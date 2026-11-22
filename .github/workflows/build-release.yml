@@ -67,13 +67,14 @@ jobs:
               assert "targetApiVersion=102" in prop_text
               init_raw = zf.read("META-INF/xposed/java_init.list")
               assert b"\r" not in init_raw, "java_init.list contains CR"
-              assert init_raw.decode("utf-8").strip() == "com.overlayai.assistant.xposed.WebViewDomModule"
+              assert init_raw.decode("utf-8").strip() == "com.scluzlep.searchcx.xposed.WebViewDomModule"
           print("Verified debug APK libxposed API 102 structure")
           PY
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           MANIFEST_TREE="$("$BUILD_TOOLS/aapt2" dump xmltree "$DEBUG_APK" --file AndroidManifest.xml)"
-          echo "$MANIFEST_TREE" | grep -q "com.overlayai.assistant.OverlayApplication"
+          echo "$MANIFEST_TREE" | grep -q "com.scluzlep.searchcx.OverlayApplication"
           echo "$MANIFEST_TREE" | grep -q "io.github.libxposed.service.XposedProvider"
+          echo "$MANIFEST_TREE" | grep -q "com.scluzlep.searchcx.XposedService"
           if echo "$MANIFEST_TREE" | grep -q "xposedminversion"; then
             echo "::error::Legacy xposedminversion metadata present"
             exit 1
@@ -236,8 +237,9 @@ jobs:
           fi
 
           MANIFEST_TREE="$("$BUILD_TOOLS/aapt2" dump xmltree "$OUT_APK" --file AndroidManifest.xml)"
-          echo "$MANIFEST_TREE" | grep -q "com.overlayai.assistant.OverlayApplication"
+          echo "$MANIFEST_TREE" | grep -q "com.scluzlep.searchcx.OverlayApplication"
           echo "$MANIFEST_TREE" | grep -q "io.github.libxposed.service.XposedProvider"
+          echo "$MANIFEST_TREE" | grep -q "com.scluzlep.searchcx.XposedService"
           if echo "$MANIFEST_TREE" | grep -q "xposedminversion"; then
             echo "::error::Legacy xposedminversion metadata present in release APK"
             exit 1
@@ -251,7 +253,7 @@ jobs:
               prop = zf.read("META-INF/xposed/module.prop").decode("utf-8")
               assert "minApiVersion=102" in prop
               assert "targetApiVersion=102" in prop
-              assert zf.read("META-INF/xposed/java_init.list").decode("utf-8").strip() == "com.overlayai.assistant.xposed.WebViewDomModule"
+              assert zf.read("META-INF/xposed/java_init.list").decode("utf-8").strip() == "com.scluzlep.searchcx.xposed.WebViewDomModule"
           print("Verified release APK libxposed API 102 structure")
           PY
 

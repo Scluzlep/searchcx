@@ -40,7 +40,7 @@
                 <data
                     android:host="oauth"
                     android:pathPrefix="/callback"
-                    android:scheme="overlayai" />
+                    android:scheme="searchcx" />
             </intent-filter>
         </activity>
 

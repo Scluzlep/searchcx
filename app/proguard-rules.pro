@@ -4,4 +4,4 @@
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }
--keep class com.overlayai.assistant.xposed.ModuleStatus { *; }
+-keep class com.scluzlep.searchcx.xposed.ModuleStatus { *; }

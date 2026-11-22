@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.overlayai.assistant"
+    namespace = "com.scluzlep.searchcx"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.overlayai.assistant"
+        applicationId = "com.scluzlep.searchcx"
         minSdk = 28
         targetSdk = 35
         versionCode = System.getenv("SEARCHCX_VERSION_CODE")?.toIntOrNull() ?: 3
