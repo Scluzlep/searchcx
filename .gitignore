@@ -1,0 +1,67 @@
+# Build & cache directories
+.gradle/
+.kotlin/
+build/
+*/build/
+out/
+dist/
+work/
+release_assets/
+captures/
+.cxx/
+.externalNativeBuild/
+
+# Compiled binaries & archives
+*.apk
+*.ap_
+*.aab
+*.aar
+*.dex
+*.class
+*.idsig
+*.zip
+
+# Signing keys, certificates & secrets
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+*.crt
+*.cer
+*.csr
+*.der
+*password*.txt
+signing.properties
+keystore.properties
+secrets.*
+*-signing/
+.env
+.env.*
+!.env.example
+google-services.json
+
+# Local SDK & IDE configs
+local.properties
+*.iml
+.idea/
+*.ipr
+*.iws
+.vscode/
+.fleet/
+.antigravity/
+.navigation/
+*.hprof
+
+# OS, Python & temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.bak
+*~
+*.swp
+__pycache__/
+*.py[cod]

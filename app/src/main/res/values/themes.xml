@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.OverlayAi" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#3482FF</item>
+        <item name="colorPrimaryDark">#F7F7F7</item>
+        <item name="colorAccent">#3482FF</item>
+        <item name="android:windowBackground">#F7F7F7</item>
+        <item name="android:statusBarColor">#F7F7F7</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
