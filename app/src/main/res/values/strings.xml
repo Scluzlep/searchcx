@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">AI DOM 悬浮助手</string>
-    <string name="module_description">Modern Xposed API 102 read-only WebView DOM and selection reader for AI Overlay Assistant</string>
+    <string name="app_name">SearchCX</string>
+    <string name="module_description">SearchCX libxposed API 102 WebView DOM reader</string>
 </resources>

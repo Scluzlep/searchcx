@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MiuixTheme(colors = lightColorScheme()) {
                 Scaffold(
-                    topBar = { TopAppBar(title = "AI 悬浮助手") }
+                    topBar = { TopAppBar(title = "SearchCX") }
                 ) { innerPadding ->
                     Column(
                         modifier = Modifier

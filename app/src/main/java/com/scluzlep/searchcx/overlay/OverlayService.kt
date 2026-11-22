@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.scluzlep.searchcx.R
 import com.scluzlep.searchcx.data.AppConfigStore
 import com.scluzlep.searchcx.data.CollapsedBallStyle
 import com.scluzlep.searchcx.ipc.DomIpcContract
@@ -203,7 +204,7 @@ class OverlayService : Service() {
     private fun startAsForegroundService(includeMediaProjection: Boolean) {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "AI DOM 悬浮助手", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL_ID, "SearchCX", NotificationManager.IMPORTANCE_LOW)
         )
 
         val openMainIntent = PendingIntent.getActivity(
@@ -214,9 +215,9 @@ class OverlayService : Service() {
         )
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("AI 悬浮助手运行中")
-            .setContentText("支持 WebView DOM 读取与屏幕框选识别")
+            .setSmallIcon(R.drawable.ic_stat_searchcx)
+            .setContentTitle("SearchCX 运行中")
+            .setContentText("网页读取与截屏框选")
             .setContentIntent(openMainIntent)
             .setOngoing(true)
             .build()

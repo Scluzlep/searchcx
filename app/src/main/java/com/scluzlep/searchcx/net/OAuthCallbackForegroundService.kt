@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.scluzlep.searchcx.R
 
 /**
  * Short-lived foreground service holding process priority while Custom Tabs
@@ -36,9 +37,9 @@ class OAuthCallbackForegroundService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("正在等待浏览器 OAuth 授权回调")
-            .setContentText("请在浏览器完成登录后自动返回应用")
+            .setSmallIcon(R.drawable.ic_stat_searchcx)
+            .setContentTitle("SearchCX OAuth 回调监听")
+            .setContentText("完成登录后将自动返回应用")
             .setOngoing(true)
             .build()
 
