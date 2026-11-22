@@ -297,7 +297,7 @@ jobs:
 
           ### Verify signature with SigHelper
           \`\`\`bash
-          android-sig veri <owner>/<repo> --apk ${{ steps.sign.outputs.apk_name }}
+          android-sig veri ${GITHUB_REPOSITORY} --apk ${{ steps.sign.outputs.apk_name }}
           \`\`\`
           EOF
 
