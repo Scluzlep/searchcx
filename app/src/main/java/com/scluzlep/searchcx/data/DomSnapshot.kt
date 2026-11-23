@@ -1,6 +1,13 @@
 package com.scluzlep.searchcx.data
 
+import org.json.JSONArray
 import org.json.JSONObject
+
+data class DomQuizItem(
+    val question: String,
+    val options: List<String> = emptyList(),
+    val type: Int = 0
+)
 
 data class DomSnapshot(
     val sourcePackage: String,
@@ -10,7 +17,8 @@ data class DomSnapshot(
     val bodyText: String,
     val crossOriginIframeCount: Int,
     val capturedAtMs: Long,
-    val error: String? = null
+    val error: String? = null,
+    val extractedQuestions: List<DomQuizItem> = emptyList()
 ) {
     fun hasError(): Boolean = !error.isNullOrBlank()
 
@@ -46,6 +54,20 @@ data class DomSnapshot(
     }
 
     fun toJson(): String {
+        val quizArray = JSONArray()
+        for (item in extractedQuestions) {
+            val optArray = JSONArray()
+            for (opt in item.options) {
+                optArray.put(opt)
+            }
+            quizArray.put(
+                JSONObject().apply {
+                    put("question", item.question)
+                    put("options", optArray)
+                    put("type", item.type)
+                }
+            )
+        }
         return JSONObject().apply {
             put("sourcePackage", sourcePackage)
             put("url", url)
@@ -55,10 +77,43 @@ data class DomSnapshot(
             put("crossOriginIframeCount", crossOriginIframeCount)
             put("capturedAtMs", capturedAtMs)
             if (error != null) put("error", error)
+            put("extractedQuestions", quizArray)
         }.toString()
     }
 
     companion object {
+        const val MAX_EXTRACTED_QUESTIONS = 15
+        const val MAX_QUESTION_CHARS = 2000
+        const val MAX_OPTIONS_PER_QUESTION = 12
+
+        fun parseQuizItems(array: JSONArray?): List<DomQuizItem> {
+            if (array == null || array.length() == 0) return emptyList()
+            val items = mutableListOf<DomQuizItem>()
+            val seenStems = hashSetOf<String>()
+            for (i in 0 until array.length()) {
+                if (items.size >= MAX_EXTRACTED_QUESTIONS) break
+                val obj = array.optJSONObject(i) ?: continue
+                val question = obj.optString("question", "").trim().take(MAX_QUESTION_CHARS)
+                if (question.isEmpty() || !seenStems.add(question)) continue
+
+                val optArray = obj.optJSONArray("options")
+                val options = if (optArray != null) {
+                    buildList {
+                        for (j in 0 until optArray.length()) {
+                            if (size >= MAX_OPTIONS_PER_QUESTION) break
+                            val opt = optArray.optString(j, "").trim()
+                            if (opt.isNotEmpty()) add(opt)
+                        }
+                    }
+                } else {
+                    emptyList()
+                }
+                val type = obj.optInt("type", 0).coerceIn(0, 4)
+                items.add(DomQuizItem(question = question, options = options, type = type))
+            }
+            return items
+        }
+
         fun fromJson(raw: String): DomSnapshot {
             require(raw.isNotBlank()) { "DOM snapshot JSON must not be blank" }
             val obj = JSONObject(raw)
@@ -67,6 +122,7 @@ data class DomSnapshot(
             } else {
                 null
             }
+            val quizItems = parseQuizItems(obj.optJSONArray("extractedQuestions"))
             return DomSnapshot(
                 sourcePackage = obj.optString("sourcePackage", ""),
                 url = obj.optString("url", ""),
@@ -75,7 +131,8 @@ data class DomSnapshot(
                 bodyText = obj.optString("bodyText", ""),
                 crossOriginIframeCount = obj.optInt("crossOriginIframeCount", 0),
                 capturedAtMs = obj.optLong("capturedAtMs", 0L),
-                error = err
+                error = err,
+                extractedQuestions = quizItems
             )
         }
 
@@ -89,7 +146,8 @@ data class DomSnapshot(
                 bodyText = "",
                 crossOriginIframeCount = 0,
                 capturedAtMs = System.currentTimeMillis(),
-                error = message
+                error = message,
+                extractedQuestions = emptyList()
             )
         }
     }
