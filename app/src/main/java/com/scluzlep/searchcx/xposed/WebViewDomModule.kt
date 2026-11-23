@@ -641,6 +641,7 @@ class WebViewDomModule : XposedModule() {
             val selected = decoded.optString("selectedText").take(DomIpcContract.MAX_BODY_CHARS)
             val body = decoded.optString("bodyText").take(DomIpcContract.MAX_BODY_CHARS)
             val iframeCount = decoded.optInt("crossOriginIframeCount", 0).coerceAtLeast(0)
+            val extractedQuestions = DomSnapshot.parseQuizItems(decoded.optJSONArray("extractedQuestions"))
             DomSnapshot(
                 sourcePackage = sourcePackage,
                 url = url,
@@ -649,7 +650,8 @@ class WebViewDomModule : XposedModule() {
                 bodyText = body,
                 crossOriginIframeCount = iframeCount,
                 capturedAtMs = System.currentTimeMillis(),
-                error = null
+                error = null,
+                extractedQuestions = extractedQuestions
             )
         }.getOrElse { err ->
             DomSnapshot.errorSnapshot(sourcePackage, "解析 DOM JSON 失败：${err.message}")
@@ -685,10 +687,154 @@ class WebViewDomModule : XposedModule() {
             (function() {
               try {
                 var maxLen = ${DomIpcContract.MAX_BODY_CHARS};
+                var maxQuestions = ${DomSnapshot.MAX_EXTRACTED_QUESTIONS};
+                var maxQuestionChars = ${DomSnapshot.MAX_QUESTION_CHARS};
+                var maxOptions = ${DomSnapshot.MAX_OPTIONS_PER_QUESTION};
                 var crossCount = 0;
                 var selObj = window.getSelection ? window.getSelection() : null;
                 var selected = selObj ? String(selObj.toString() || '').trim() : '';
                 var chunks = [];
+                var extractedQuestions = [];
+                var seenQuestions = {};
+
+                var containerSelector = '.TiMu, .questionLi, .singleQuesId, .examPaper_subject, .subject_describe, .topic-item, .question-item, [class*="question-card"], [class*="ques-item"]';
+                var stemSelectors = ['.clearfix > .fl', '.mark_name', '.qtContent', '.subject_stem', '.question-stem', '.topic-title', 'h3', 'h4'];
+                var optionSelectors = ['.answerBg .answer_p', '.mark_answer li', '.option-item', '[class*="option"]', 'li', 'label'];
+
+                function cleanText(s) {
+                  return String(s || '').replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+                }
+
+                function stripOptionPrefix(s) {
+                  return cleanText(s).replace(/^[A-Ha-h][.．:：、)）]\s*/, '').trim();
+                }
+
+                function isJudgementPair(opts) {
+                  if (!opts || opts.length !== 2) return false;
+                  var a = opts[0].toLowerCase().trim();
+                  var b = opts[1].toLowerCase().trim();
+                  var pairs = [
+                    ['正确', '错误'],
+                    ['对', '错'],
+                    ['true', 'false'],
+                    ['t', 'f'],
+                    ['√', '×'],
+                    ['是', '否'],
+                    ['yes', 'no']
+                  ];
+                  for (var p = 0; p < pairs.length; p++) {
+                    var x = pairs[p][0];
+                    var y = pairs[p][1];
+                    if ((a === x && b === y) || (a === y && b === x)) return true;
+                  }
+                  return false;
+                }
+
+                function extractOptions(el) {
+                  var opts = [];
+                  for (var s = 0; s < optionSelectors.length; s++) {
+                    var sel = optionSelectors[s];
+                    var nodes = el.querySelectorAll(sel);
+                    if (!nodes || nodes.length === 0) continue;
+                    var candidateOpts = [];
+                    var seenOpt = {};
+                    for (var j = 0; j < nodes.length; j++) {
+                      var node = nodes[j];
+                      // Skip wrapper containers that themselves contain nested option elements.
+                      if (sel === '[class*="option"]' && node.querySelector('[class*="option"], li, label')) {
+                        continue;
+                      }
+                      var txt = stripOptionPrefix(node.innerText || node.textContent || '');
+                      if (txt && !seenOpt[txt]) {
+                        seenOpt[txt] = true;
+                        candidateOpts.push(txt);
+                        if (candidateOpts.length >= maxOptions) break;
+                      }
+                    }
+                    var isGeneric = (sel === 'li' || sel === 'label');
+                    if (candidateOpts.length >= (isGeneric ? 2 : 1)) {
+                      opts = candidateOpts;
+                      break;
+                    }
+                  }
+                  return opts;
+                }
+
+                function extractStem(el, opts) {
+                  for (var i = 0; i < stemSelectors.length; i++) {
+                    var found = el.querySelector(stemSelectors[i]);
+                    if (found) {
+                      var t = cleanText(found.innerText || found.textContent || '');
+                      if (t) return t;
+                    }
+                  }
+                  var full = cleanText(el.innerText || el.textContent || '');
+                  if (!full) return '';
+                  var lines = full.split('\n');
+                  var stemLines = [];
+                  var optSet = {};
+                  for (var k = 0; k < opts.length; k++) {
+                    optSet[opts[k]] = true;
+                  }
+                  for (var idx = 0; idx < lines.length; idx++) {
+                    var line = lines[idx].trim();
+                    if (!line) continue;
+                    var stripped = stripOptionPrefix(line);
+                    if (optSet[stripped]) break;
+                    stemLines.push(line);
+                    if (stemLines.length >= 6) break;
+                  }
+                  return stemLines.join('\n').trim() || lines[0].trim();
+                }
+
+                function inferType(el, stem, opts) {
+                  if (isJudgementPair(opts)) return 3;
+                  if (el.querySelector('input[type="checkbox"]')) return 1;
+                  if (el.querySelector('input[type="radio"]')) return 0;
+                  if (el.querySelector('input[type="text"]')) return 2;
+                  if (el.querySelector('textarea, [contenteditable="true"]')) {
+                    if (stem.indexOf('填空') >= 0) return 2;
+                    return 4;
+                  }
+                  if (opts.length >= 2) {
+                    if (stem.indexOf('多选') >= 0) return 1;
+                    return 0;
+                  }
+                  if (stem.indexOf('填空') >= 0) return 2;
+                  return 4;
+                }
+
+                function extractQuestionsFromDoc(doc) {
+                  if (!doc || extractedQuestions.length >= maxQuestions) return;
+                  var containers = doc.querySelectorAll(containerSelector);
+                  if (!containers || containers.length === 0) return;
+                  var capturedEls = [];
+                  for (var i = 0; i < containers.length; i++) {
+                    if (extractedQuestions.length >= maxQuestions) break;
+                    var el = containers[i];
+                    var nested = false;
+                    for (var c = 0; c < capturedEls.length; c++) {
+                      if (capturedEls[c] === el || capturedEls[c].contains(el)) {
+                        nested = true;
+                        break;
+                      }
+                    }
+                    if (nested) continue;
+                    var opts = extractOptions(el);
+                    var stem = extractStem(el, opts);
+                    if (!stem) continue;
+                    if (stem.length > maxQuestionChars) stem = stem.slice(0, maxQuestionChars);
+                    if (seenQuestions[stem]) continue;
+                    seenQuestions[stem] = true;
+                    capturedEls.push(el);
+                    extractedQuestions.push({
+                      question: stem,
+                      options: opts,
+                      type: inferType(el, stem, opts)
+                    });
+                  }
+                }
+
                 function extractDocText(doc) {
                   if (!doc) return;
                   try {
@@ -704,6 +850,9 @@ class WebViewDomModule : XposedModule() {
                       if (t) chunks.push(t);
                     }
                   } catch (eBody) {}
+                  try {
+                    extractQuestionsFromDoc(doc);
+                  } catch (eQuiz) {}
                   try {
                     var frames = doc.querySelectorAll('iframe, frame');
                     for (var i = 0; i < frames.length; i++) {
@@ -729,7 +878,8 @@ class WebViewDomModule : XposedModule() {
                   title: String(document.title || ''),
                   selectedText: selected,
                   bodyText: bodyText,
-                  crossOriginIframeCount: crossCount
+                  crossOriginIframeCount: crossCount,
+                  extractedQuestions: extractedQuestions
                 });
               } catch (e) {
                 return JSON.stringify({
@@ -737,7 +887,8 @@ class WebViewDomModule : XposedModule() {
                   title: String(document.title || ''),
                   selectedText: '',
                   bodyText: '',
-                  crossOriginIframeCount: 0
+                  crossOriginIframeCount: 0,
+                  extractedQuestions: []
                 });
               }
             })();
