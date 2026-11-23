@@ -11,9 +11,13 @@ import java.util.Base64
 internal object BuguakeParser {
     private const val KEY_PREFIX = "34cab29ef956d78afd"
     private const val MIN_SIMILARITY = 0.8
+    private val HTML_BR_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
+    private val HTML_TAG_REGEX = Regex("""<[^>]+>""")
+    private val WHITESPACE_REGEX = Regex("""\s+""")
 
     fun parse(question: String, response: JSONObject): List<String> {
         val list = response.optJSONObject("data")?.optJSONArray("list") ?: return emptyList()
+        val normalizedQuestion = TikuAnswerResolver.normalizeAnswerText(question)
         var bestScore = MIN_SIMILARITY
         var bestAnswers = emptyList<String>()
         for (i in 0 until list.length()) {
@@ -22,10 +26,12 @@ internal object BuguakeParser {
                 JSONObject(decode(entry.getString("bdjson"), entry.getString("actk")))
             }.getOrNull() ?: continue
 
-            val stem = decoded.optJSONArray("que_stem")
-                ?.optJSONObject(0)?.optJSONArray("c")
-                ?.optJSONObject(0)?.optString("c", "").orEmpty()
-            val score = similarity(question, stem)
+            val stem = extractBlocksText(decoded.optJSONArray("que_stem"))
+            val normalizedStem = TikuAnswerResolver.normalizeAnswerText(stem)
+            val score = maxOf(
+                similarity(question, stem),
+                similarity(normalizedQuestion, normalizedStem)
+            )
             if (score < MIN_SIMILARITY) continue
 
             val candidate = ArrayList<String>()
@@ -34,19 +40,16 @@ internal object BuguakeParser {
                 for (j in 0 until options.length()) {
                     val option = options.optJSONObject(j) ?: continue
                     if (!option.optBoolean("yes")) continue
-                    val text = option.optJSONArray("ret")?.optJSONObject(0)
-                        ?.optJSONArray("c")?.optJSONObject(0)
-                        ?.optString("c", "").orEmpty().trim()
+                    val text = extractBlocksText(option.optJSONArray("ret"))
                     if (text.isNotEmpty()) candidate.add(text)
                 }
             }
             if (candidate.isEmpty()) {
-                val answer = decoded.optJSONArray("que_answer")?.optJSONObject(0)
-                    ?.optJSONArray("c")
-                if (answer != null) {
-                    for (j in 0 until answer.length()) {
-                        val text = answer.optJSONObject(j)?.optString("c", "").orEmpty().trim()
-                        if (text.isNotEmpty()) candidate.add(text)
+                val answerBlocks = decoded.optJSONArray("que_answer")
+                if (answerBlocks != null) {
+                    for (j in 0 until answerBlocks.length()) {
+                        val blockText = extractSingleBlockText(answerBlocks.optJSONObject(j))
+                        if (blockText.isNotEmpty()) candidate.add(blockText)
                     }
                 }
             }
@@ -59,6 +62,53 @@ internal object BuguakeParser {
             }
         }
         return bestAnswers
+    }
+
+    private fun extractBlocksText(blocks: org.json.JSONArray?): String {
+        if (blocks == null || blocks.length() == 0) return ""
+        val sb = StringBuilder()
+        for (i in 0 until blocks.length()) {
+            val part = extractSingleBlockText(blocks.optJSONObject(i))
+            if (part.isNotEmpty()) {
+                if (sb.isNotEmpty()) sb.append(' ')
+                sb.append(part)
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    private fun extractSingleBlockText(block: JSONObject?): String {
+        if (block == null) return ""
+        val chunks = block.optJSONArray("c")
+        if (chunks != null) {
+            val sb = StringBuilder()
+            for (k in 0 until chunks.length()) {
+                val item = chunks.opt(k)
+                val rawChunk = when (item) {
+                    is JSONObject -> item.optString("c", "")
+                    is String -> item
+                    else -> ""
+                }
+                if (rawChunk.isNotEmpty()) sb.append(rawChunk)
+            }
+            return cleanRichText(sb.toString())
+        }
+        return cleanRichText(block.optString("c", ""))
+    }
+
+    private fun cleanRichText(raw: String): String {
+        if (raw.isBlank()) return ""
+        return raw
+            .replace(HTML_BR_REGEX, " ")
+            .replace(HTML_TAG_REGEX, "")
+            .replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace(WHITESPACE_REGEX, " ")
+            .trim()
     }
 
     internal fun decode(bdjson: String, actk: String): String {

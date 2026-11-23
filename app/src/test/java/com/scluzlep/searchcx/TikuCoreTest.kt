@@ -531,6 +531,47 @@ class TikuCoreTest {
         }
     }
 
+    @Test
+    fun aidianResolvesItemOptionLettersAndSelectsBestQlistCandidate() = runBlocking {
+        val aidianPayload = """
+            {
+              "code": 0,
+              "qlist": [
+                {
+                  "question": "与当前毫无关系的古代历史事件是",
+                  "options": ["A. 选项甲", "B. 选项乙"],
+                  "answer": ["A"]
+                },
+                {
+                  "question": "中国的首都是哪一座城市？",
+                  "options": ["A. 上海", "B. 北京", "C. 广州"],
+                  "answer": ["B"]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val client = TikuAdapterClient(mockOkHttp { req ->
+            when {
+                req.url.toString().startsWith("http://new.api.51aidian.com/publics/newapi/freedirect") ->
+                    jsonResponse(req, aidianPayload)
+                else -> error("Unexpected URL: ${req.url}")
+            }
+        })
+
+        val cfg = TikuConfig(
+            mode = TikuMode.DIRECT_BUILTIN,
+            enabledProviders = setOf("aidian")
+        )
+        val res = client.searchOne(
+            TikuSearchRequest("中国的首都是哪座城市？", listOf("上海", "北京", "广州")),
+            cfg
+        )
+        assertTrue(res.isHit())
+        assertEquals("B", res.answerKeyText)
+        assertEquals(listOf("北京"), res.bestAnswer)
+    }
+
     private data class CapturedHttp(val request: Request, val body: String)
 
     private fun mockOkHttp(handler: (Request) -> Response): OkHttpClient {

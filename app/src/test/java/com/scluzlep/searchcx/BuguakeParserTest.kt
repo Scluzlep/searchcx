@@ -93,6 +93,36 @@ class BuguakeParserTest {
         assertEquals("B", res.answerKeyText)
     }
 
+    @Test
+    fun matchesNormalizedPunctuationHtmlWrappersAndMultiChunkBlocks() {
+        val richEntry = JSONObject(
+            """{"que_stem":[{"c":[{"c":"<p>中国的首都是"},{"c":"（）</p>"}]}],
+               "que_options":[[
+                  {"yes":false,"ret":[{"c":[{"c":"<span>上海</span>"}]}]},
+                  {"yes":true,"ret":[{"c":[{"c":"<p>北"},{"c":"京&nbsp;</p>"}]}]}
+               ]]}"""
+        )
+        val htmlFallbackEntry = JSONObject(
+            """{"que_stem":[{"c":[{"c":"<p>机器学习中的<strong>过拟合</strong>指（）</p>"}]}],
+               "que_answer":[
+                  {"c":[{"c":"<span>训练集误差极小</span>"}]},
+                  {"c":[{"c":"测试集误差&nbsp;较大"}]}
+               ]}"""
+        )
+        val payload = JSONObject().put("data", JSONObject().put("list", JSONArray()
+            .put(entry(richEntry))
+            .put(entry(htmlFallbackEntry))))
+
+        assertEquals(
+            listOf("北京"),
+            BuguakeParser.parse("中国的首都是()", payload)
+        )
+        assertEquals(
+            listOf("训练集误差极小", "测试集误差 较大"),
+            BuguakeParser.parse("机器学习中的过拟合指()", payload)
+        )
+    }
+
     private fun entry(data: JSONObject): JSONObject {
         val actk = "test"
         val escaped = URLEncoder.encode(data.toString(), "UTF-8")

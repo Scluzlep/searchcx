@@ -439,16 +439,7 @@ class TikuAdapterClient(
                 if (data.isNull("answer")) return emptyList()
                 splitHashAnswers(data.optString("answer", ""))
             }
-            TikuProvider.AIDIAN -> {
-                val qlist = root.optJSONArray("qlist") ?: return emptyList()
-                val out = ArrayList<String>()
-                for (i in 0 until qlist.length()) {
-                    val item = qlist.optJSONObject(i) ?: continue
-                    val raw = item.opt("answer") ?: continue
-                    out.addAll(extractFlexibleAnswers(raw))
-                }
-                out
-            }
+            TikuProvider.AIDIAN -> parseAidianAnswers(root, req)
             TikuProvider.LEMON -> {
                 if (root.optInt("code", -1) != 1000) return emptyList()
                 val data = root.optJSONObject("data") ?: return emptyList()
@@ -456,6 +447,49 @@ class TikuAdapterClient(
                 splitHashAnswers(data.optString("answer", ""))
             }
         }
+    }
+
+    private fun parseAidianAnswers(root: JSONObject, req: TikuSearchRequest): List<String> {
+        val qlist = root.optJSONArray("qlist") ?: return emptyList()
+        var bestScore = -1.0
+        var bestAnswers = emptyList<String>()
+        for (i in 0 until qlist.length()) {
+            val item = qlist.optJSONObject(i) ?: continue
+            val raw = item.opt("answer") ?: continue
+            val rawAnswers = extractFlexibleAnswers(raw)
+            if (rawAnswers.isEmpty()) continue
+
+            val itemOptions = readStringList(item.optJSONArray("options")).map { opt ->
+                TikuAnswerResolver.stripOptionPrefix(opt).ifEmpty { opt }
+            }
+            val resolved = ArrayList<String>(rawAnswers.size)
+            for (token in rawAnswers) {
+                val plain = TikuAnswerResolver.resolvePlainAnswer(token)
+                if (itemOptions.isNotEmpty() &&
+                    plain != null &&
+                    plain.all { (it - 'A') in itemOptions.indices }
+                ) {
+                    for (ch in plain) {
+                        resolved.add(itemOptions[ch - 'A'])
+                    }
+                } else {
+                    resolved.add(token)
+                }
+            }
+            if (resolved.isEmpty()) continue
+
+            val itemQuestion = item.optString("question", "").trim()
+            val score = if (itemQuestion.isNotEmpty()) {
+                TikuAnswerResolver.diceSimilarity(req.question, itemQuestion)
+            } else {
+                0.0
+            }
+            if (bestAnswers.isEmpty() || score > bestScore) {
+                bestAnswers = resolved.distinct()
+                bestScore = score
+            }
+        }
+        return bestAnswers
     }
 
     private fun extractWannengAnswers(result: JSONObject): List<String> {
