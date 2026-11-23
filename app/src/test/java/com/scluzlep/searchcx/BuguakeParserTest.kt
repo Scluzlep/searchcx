@@ -43,9 +43,14 @@ class BuguakeParserTest {
             """{"que_stem":[{"c":[{"c":"中国的首都是？"}]}],
                 "que_answer":[{"c":[{"c":"北京"}]}]}"""
         )
+        val nearMatch = JSONObject(
+            """{"que_stem":[{"c":[{"c":"中国的首都是哪？"}]}],
+                "que_answer":[{"c":[{"c":"错误的近似题答案"}]}]}"""
+        )
         val payload = JSONObject().put("data", JSONObject().put("list", JSONArray()
             .put(entry(expected))
             .put(entry(irrelevant))
+            .put(entry(nearMatch))
             .put(entry(fallback))
             .put(JSONObject().put("bdjson", "invalid-base64").put("actk", "test"))))
         assertEquals(listOf("北京"), BuguakeParser.parse("中国的首都是？", payload))

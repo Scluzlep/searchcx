@@ -14,7 +14,8 @@ internal object BuguakeParser {
 
     fun parse(question: String, response: JSONObject): List<String> {
         val list = response.optJSONObject("data")?.optJSONArray("list") ?: return emptyList()
-        val answers = ArrayList<String>()
+        var bestScore = MIN_SIMILARITY
+        var bestAnswers = emptyList<String>()
         for (i in 0 until list.length()) {
             val entry = list.optJSONObject(i) ?: continue
             val decoded = runCatching {
@@ -24,8 +25,10 @@ internal object BuguakeParser {
             val stem = decoded.optJSONArray("que_stem")
                 ?.optJSONObject(0)?.optJSONArray("c")
                 ?.optJSONObject(0)?.optString("c", "").orEmpty()
-            if (similarity(question, stem) < MIN_SIMILARITY) continue
+            val score = similarity(question, stem)
+            if (score < MIN_SIMILARITY) continue
 
+            val candidate = ArrayList<String>()
             val options = decoded.optJSONArray("que_options")?.optJSONArray(0)
             if (options != null) {
                 for (j in 0 until options.length()) {
@@ -34,21 +37,28 @@ internal object BuguakeParser {
                     val text = option.optJSONArray("ret")?.optJSONObject(0)
                         ?.optJSONArray("c")?.optJSONObject(0)
                         ?.optString("c", "").orEmpty().trim()
-                    if (text.isNotEmpty()) answers.add(text)
+                    if (text.isNotEmpty()) candidate.add(text)
                 }
             }
-            if (answers.isNotEmpty()) continue
-
-            val answer = decoded.optJSONArray("que_answer")?.optJSONObject(0)
-                ?.optJSONArray("c")
-            if (answer != null) {
-                for (j in 0 until answer.length()) {
-                    val text = answer.optJSONObject(j)?.optString("c", "").orEmpty().trim()
-                    if (text.isNotEmpty()) answers.add(text)
+            if (candidate.isEmpty()) {
+                val answer = decoded.optJSONArray("que_answer")?.optJSONObject(0)
+                    ?.optJSONArray("c")
+                if (answer != null) {
+                    for (j in 0 until answer.length()) {
+                        val text = answer.optJSONObject(j)?.optString("c", "").orEmpty().trim()
+                        if (text.isNotEmpty()) candidate.add(text)
+                    }
                 }
+            }
+
+            // Each search result is an alternative candidate, not an additional
+            // correct option. Do not merge answers from unrelated near matches.
+            if (candidate.isNotEmpty() && (bestAnswers.isEmpty() || score > bestScore)) {
+                bestAnswers = candidate.distinct()
+                bestScore = score
             }
         }
-        return answers.distinct()
+        return bestAnswers
     }
 
     internal fun decode(bdjson: String, actk: String): String {
