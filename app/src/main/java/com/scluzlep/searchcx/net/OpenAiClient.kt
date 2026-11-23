@@ -21,11 +21,30 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+data class ChatImage(
+    val mimeType: String = "image/jpeg",
+    val base64: String
+)
+
 data class ChatTurn(
     val role: String,
     val content: String,
-    val imageBase64Jpeg: String? = null
-)
+    val imageBase64Jpeg: String? = null,
+    val images: List<ChatImage> = emptyList()
+) {
+    fun allImages(): List<ChatImage> {
+        val out = ArrayList<ChatImage>(images.size + 1)
+        if (!imageBase64Jpeg.isNullOrBlank()) {
+            out.add(ChatImage("image/jpeg", imageBase64Jpeg))
+        }
+        for (img in images) {
+            if (img.base64.isNotBlank()) {
+                out.add(img)
+            }
+        }
+        return out
+    }
+}
 
 sealed interface StreamEvent {
     data class TextDelta(val text: String) : StreamEvent
@@ -262,19 +281,22 @@ object OpenAiSseParser {
             messages.put(JSONObject().put("role", "system").put("content", systemPrompt.trim()))
         }
         for (turn in history) {
-            if (!turn.imageBase64Jpeg.isNullOrBlank()) {
+            val turnImages = turn.allImages()
+            if (turnImages.isNotEmpty()) {
                 val parts = JSONArray().apply {
                     if (turn.content.isNotBlank()) {
                         put(JSONObject().put("type", "text").put("text", turn.content))
                     }
-                    put(
-                        JSONObject()
-                            .put("type", "image_url")
-                            .put(
-                                "image_url",
-                                JSONObject().put("url", "data:image/jpeg;base64,${turn.imageBase64Jpeg}")
-                            )
-                    )
+                    for (img in turnImages) {
+                        put(
+                            JSONObject()
+                                .put("type", "image_url")
+                                .put(
+                                    "image_url",
+                                    JSONObject().put("url", "data:${img.mimeType};base64,${img.base64}")
+                                )
+                        )
+                    }
                 }
                 messages.put(JSONObject().put("role", turn.role).put("content", parts))
             } else {
@@ -305,16 +327,19 @@ object OpenAiSseParser {
             )
         }
         for (turn in history) {
-            if (!turn.imageBase64Jpeg.isNullOrBlank()) {
+            val turnImages = turn.allImages()
+            if (turnImages.isNotEmpty()) {
                 val parts = JSONArray().apply {
                     if (turn.content.isNotBlank()) {
                         put(JSONObject().put("type", "input_text").put("text", turn.content))
                     }
-                    put(
-                        JSONObject()
-                            .put("type", "input_image")
-                            .put("image_url", "data:image/jpeg;base64,${turn.imageBase64Jpeg}")
-                    )
+                    for (img in turnImages) {
+                        put(
+                            JSONObject()
+                                .put("type", "input_image")
+                                .put("image_url", "data:${img.mimeType};base64,${img.base64}")
+                        )
+                    }
                 }
                 input.put(JSONObject().put("role", turn.role).put("content", parts))
             } else {

@@ -88,6 +88,39 @@ class OpenAiSseParserTest {
         assertEquals("developer", codexPayload.getJSONArray("input").getJSONObject(0).getString("role"))
         assertEquals(false, codexPayload.getBoolean("store"))
         assertTrue(!codexPayload.has("temperature"))
+
+        val multiTurn = ChatTurn(
+            role = "user",
+            content = "求 [图片1] 与 [图片2]",
+            imageBase64Jpeg = "Q1JP",
+            images = listOf(
+                ChatImage(mimeType = "image/png", base64 = "RUEx"),
+                ChatImage(mimeType = "image/jpeg", base64 = "RUFGMg==")
+            )
+        )
+        val multiChat = OpenAiSseParser.buildChatCompletionsPayload(
+            model = "gpt-4o",
+            systemPrompt = "",
+            history = listOf(multiTurn),
+            temperature = 0.1
+        )
+        val multiChatContent = multiChat.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+        assertEquals(4, multiChatContent.length())
+        assertEquals("data:image/jpeg;base64,Q1JP", multiChatContent.getJSONObject(1).getJSONObject("image_url").getString("url"))
+        assertEquals("data:image/png;base64,RUEx", multiChatContent.getJSONObject(2).getJSONObject("image_url").getString("url"))
+        assertEquals("data:image/jpeg;base64,RUFGMg==", multiChatContent.getJSONObject(3).getJSONObject("image_url").getString("url"))
+
+        val multiResp = OpenAiSseParser.buildResponsesPayload(
+            model = "gpt-5.1-codex",
+            systemPrompt = "",
+            history = listOf(multiTurn),
+            temperature = null,
+            isCodex = true
+        )
+        val multiRespContent = multiResp.getJSONArray("input").getJSONObject(0).getJSONArray("content")
+        assertEquals(4, multiRespContent.length())
+        assertEquals("input_image", multiRespContent.getJSONObject(2).getString("type"))
+        assertEquals("data:image/png;base64,RUEx", multiRespContent.getJSONObject(2).getString("image_url"))
     }
 
     @Suppress("DEPRECATION")

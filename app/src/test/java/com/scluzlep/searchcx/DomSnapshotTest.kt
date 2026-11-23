@@ -164,4 +164,88 @@ class DomSnapshotTest {
         assertEquals(0, bounded.extractedQuestions[0].type)
         assertEquals(4, bounded.extractedQuestions[1].type)
     }
+
+    @Test
+    fun prioritizesSelectionThenVisibleQuestionsThenFullDomFallbackAndPrunesImages() {
+        val visibleQuestion = DomQuizItem(
+            question = "求函数 \$f(x)=\\frac{x^2}{2}\$ 的导数 [图片2]",
+            options = listOf("x", "2x"),
+            type = 0,
+            inViewport = true,
+            imageIndices = listOf(2)
+        )
+        val offscreenQuestion = DomQuizItem(
+            question = "离屏第一题 [图片1]",
+            options = listOf("甲", "乙"),
+            type = 0,
+            inViewport = false,
+            imageIndices = listOf(1)
+        )
+        val allImgs = listOf(
+            DomImageItem(index = 1, url = "https://cdn.example.com/offscreen.png", isFormula = false),
+            DomImageItem(index = 2, url = "https://cdn.example.com/formula.png", width = 42, height = 18, isFormula = true),
+            DomImageItem(index = 3, url = "https://cdn.example.com/footer_banner.png", isFormula = false)
+        )
+
+        // Priority 1: non-blank selection overrides questions & body
+        val selectionSnap = DomSnapshot(
+            sourcePackage = "com.example.browser",
+            url = "https://exam.example.com/1",
+            title = "测试页",
+            selectedText = "用户选中文本 [图片3]",
+            bodyText = "整页完整正文 导航条 [图片1] [图片2] [图片3]",
+            crossOriginIframeCount = 0,
+            capturedAtMs = 2000L,
+            extractedQuestions = listOf(offscreenQuestion, visibleQuestion),
+            images = allImgs
+        )
+        assertEquals(DomContextSource.SELECTION, selectionSnap.activeContextSource())
+        assertEquals("用户选中文本 [图片3]", selectionSnap.effectiveContextText())
+        assertEquals(listOf(3), selectionSnap.activeImages().map { it.index })
+
+        // Priority 2: structured viewport questions (no full DOM dump)
+        val questionSnap = selectionSnap.copy(selectedText = "")
+        assertEquals(DomContextSource.QUESTIONS, questionSnap.activeContextSource())
+        val ctxText = questionSnap.effectiveContextText()
+        assertTrue(ctxText.contains("求函数 \$f(x)=\\frac{x^2}{2}\$ 的导数 [图片2]"))
+        assertTrue(ctxText.contains("A. x"))
+        assertTrue(!ctxText.contains("离屏第一题"))
+        assertTrue(!ctxText.contains("导航条"))
+        assertEquals(listOf(2), questionSnap.activeImages().map { it.index })
+
+        // Round-trip preserves images & viewport flags
+        val restored = DomSnapshot.fromJson(questionSnap.toJson())
+        assertEquals(questionSnap, restored)
+
+        // Priority 3: full DOM used strictly as fallback when neither selection nor questions exist
+        val fallbackSnap = questionSnap.copy(extractedQuestions = emptyList())
+        assertEquals(DomContextSource.FULL_DOM, fallbackSnap.activeContextSource())
+        assertEquals("整页完整正文 导航条 [图片1] [图片2] [图片3]", fallbackSnap.effectiveContextText())
+        assertEquals(listOf(1, 2, 3), fallbackSnap.activeImages().map { it.index })
+    }
+
+    @Test
+    fun enforcesInlineImagePayloadCapWhileKeepingRemoteUrl() {
+        val hugeDataUrl = "data:image/png;base64," + "A".repeat(DomSnapshot.MAX_INLINE_DATA_URL_CHARS + 100)
+        val json = """
+            {
+              "sourcePackage": "com.example.app",
+              "url": "https://example.com",
+              "title": "Images",
+              "selectedText": "",
+              "bodyText": "题目 [图片1]",
+              "crossOriginIframeCount": 0,
+              "capturedAtMs": 3000,
+              "images": [
+                {"index": 1, "url": "https://example.com/a.png", "dataUrl": "$hugeDataUrl", "isFormula": true},
+                {"index": 2, "url": "", "dataUrl": "$hugeDataUrl", "isFormula": false}
+              ]
+            }
+        """.trimIndent()
+        val parsed = DomSnapshot.fromJson(json)
+        assertEquals(1, parsed.images.size)
+        assertEquals("https://example.com/a.png", parsed.images[0].url)
+        assertEquals("", parsed.images[0].dataUrl)
+        assertTrue(parsed.images[0].isFormula)
+    }
 }

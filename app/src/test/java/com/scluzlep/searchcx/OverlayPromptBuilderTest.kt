@@ -88,8 +88,18 @@ class OverlayPromptBuilderTest {
     @Test
     fun clipboardContextUsesClipboardQuoteLabelWhileDomUsesDomHtml() {
         assertEquals("剪贴板文本", OverlayPromptBuilder.quoteBadgeForStatus("已粘贴"))
+        assertEquals("题目内容", OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 题目"))
+        assertEquals("页面选区", OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 选区"))
         assertEquals("DOM HTML", OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 正文"))
         assertEquals("DOM HTML", OverlayPromptBuilder.quoteBadgeForStatus("等待采集"))
+        assertEquals(
+            "题目内容 · 2 题 · 3 图",
+            OverlayPromptBuilder.formatQuoteBadge("题目内容", questionCount = 2, imageCount = 3)
+        )
+        assertEquals(
+            "已知函数 满足极限条件",
+            OverlayPromptBuilder.sanitizeForTikuSearch("已知函数 [图片1] 满足极限条件 [图片2]")
+        )
 
         val clipText = "剪贴板里的题干内容"
         val manualClip = OverlayPromptBuilder.buildManual(

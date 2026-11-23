@@ -91,13 +91,39 @@ data class BuiltPrompt(
  */
 object OverlayPromptBuilder {
     const val CONTEXT_BADGE_DOM = "DOM HTML"
+    const val CONTEXT_BADGE_QUESTIONS = "题目内容"
+    const val CONTEXT_BADGE_SELECTION = "页面选区"
     const val CONTEXT_BADGE_CLIPBOARD = "剪贴板文本"
     const val DEFAULT_EMPTY_DOM_LABEL = "解析网页内容"
     const val DEFAULT_IMAGE_ONLY_LABEL = "解析截图内容"
     const val DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
 
-    fun quoteBadgeForStatus(domStatus: String): String =
-        if (domStatus == "已粘贴") CONTEXT_BADGE_CLIPBOARD else CONTEXT_BADGE_DOM
+    private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[图片\d*\]""")
+
+    fun quoteBadgeForStatus(domStatus: String): String = when (domStatus) {
+        "已粘贴" -> CONTEXT_BADGE_CLIPBOARD
+        "已抓取 · 题目" -> CONTEXT_BADGE_QUESTIONS
+        "已抓取 · 选区" -> CONTEXT_BADGE_SELECTION
+        else -> CONTEXT_BADGE_DOM
+    }
+
+    fun formatQuoteBadge(
+        baseLabel: String,
+        questionCount: Int = 0,
+        imageCount: Int = 0
+    ): String {
+        val parts = ArrayList<String>(3)
+        parts.add(baseLabel.trim().ifEmpty { CONTEXT_BADGE_DOM })
+        if (questionCount > 0) parts.add("$questionCount 题")
+        if (imageCount > 0) parts.add("$imageCount 图")
+        return parts.joinToString(" · ")
+    }
+
+    fun sanitizeForTikuSearch(text: String): String {
+        return text.replace(IMAGE_PLACEHOLDER_REGEX, " ")
+            .replace(Regex("""[ \t]+"""), " ")
+            .trim()
+    }
 
     fun buildManual(
         rawInput: String,
@@ -175,6 +201,8 @@ data class OverlayUiState(
     val activeModel: String = "gpt-4o-mini",
     val domStatus: String = "等待采集",
     val contextMeta: String = "",
+    val domQuestionCount: Int = 0,
+    val domImageCount: Int = 0,
     val warningText: String = "",
     val contextText: String = "",
     val attachedImage: Bitmap? = null,
@@ -527,7 +555,12 @@ fun FloatingPanelComposable(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (state.contextText.isNotBlank()) {
-                    val quoteLabel = OverlayPromptBuilder.quoteBadgeForStatus(state.domStatus)
+                    val baseLabel = OverlayPromptBuilder.quoteBadgeForStatus(state.domStatus)
+                    val quoteLabel = OverlayPromptBuilder.formatQuoteBadge(
+                        baseLabel = baseLabel,
+                        questionCount = state.domQuestionCount,
+                        imageCount = state.domImageCount
+                    )
                     QuoteReferenceBlock(
                         label = quoteLabel,
                         containerBg = ACCENT_SOFT,

@@ -3,10 +3,28 @@ package com.scluzlep.searchcx.data
 import org.json.JSONArray
 import org.json.JSONObject
 
+enum class DomContextSource(val displayLabel: String) {
+    SELECTION("选区"),
+    QUESTIONS("题目"),
+    FULL_DOM("正文")
+}
+
+data class DomImageItem(
+    val index: Int,
+    val url: String = "",
+    val dataUrl: String = "",
+    val alt: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    val isFormula: Boolean = false
+)
+
 data class DomQuizItem(
     val question: String,
     val options: List<String> = emptyList(),
-    val type: Int = 0
+    val type: Int = 0,
+    val inViewport: Boolean = true,
+    val imageIndices: List<Int> = emptyList()
 )
 
 data class DomSnapshot(
@@ -18,22 +36,83 @@ data class DomSnapshot(
     val crossOriginIframeCount: Int,
     val capturedAtMs: Long,
     val error: String? = null,
-    val extractedQuestions: List<DomQuizItem> = emptyList()
+    val extractedQuestions: List<DomQuizItem> = emptyList(),
+    val images: List<DomImageItem> = emptyList()
 ) {
     fun hasError(): Boolean = !error.isNullOrBlank()
 
     fun isSelectionMode(): Boolean = selectedText.isNotBlank()
 
+    fun activeContextSource(): DomContextSource = when {
+        selectedText.isNotBlank() -> DomContextSource.SELECTION
+        extractedQuestions.any { it.question.isNotBlank() } -> DomContextSource.QUESTIONS
+        else -> DomContextSource.FULL_DOM
+    }
+
+    fun preferredQuestions(): List<DomQuizItem> {
+        val valid = extractedQuestions.filter { it.question.isNotBlank() }
+        if (valid.isEmpty()) return emptyList()
+        val visible = valid.filter { it.inViewport }
+        return if (visible.isNotEmpty()) visible else valid
+    }
+
+    fun formatQuestionsText(questions: List<DomQuizItem> = preferredQuestions()): String {
+        val valid = questions.filter { it.question.isNotBlank() }
+        if (valid.isEmpty()) return ""
+        val includeNumbers = valid.size > 1
+        val sb = StringBuilder()
+        for ((idx, item) in valid.withIndex()) {
+            if (idx > 0) sb.append("\n\n")
+            if (includeNumbers) {
+                sb.append(idx + 1).append(". ")
+            }
+            sb.append('[').append(questionTypeLabel(item.type)).append("] ").append(item.question.trim())
+            if (item.options.isNotEmpty()) {
+                for ((optIdx, opt) in item.options.withIndex()) {
+                    val cleanOpt = opt.trim()
+                    if (cleanOpt.isEmpty()) continue
+                    val letter = ('A' + optIdx)
+                    sb.append('\n').append(letter).append(". ").append(cleanOpt)
+                }
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    fun activeImages(): List<DomImageItem> {
+        if (images.isEmpty()) return emptyList()
+        val needed = LinkedHashSet<Int>()
+        val source = activeContextSource()
+        val scopeText = when (source) {
+            DomContextSource.SELECTION -> selectedText
+            DomContextSource.QUESTIONS -> {
+                val chosen = preferredQuestions()
+                chosen.forEach { needed.addAll(it.imageIndices) }
+                formatQuestionsText(chosen)
+            }
+            DomContextSource.FULL_DOM -> bodyText
+        }
+        for (match in IMAGE_PLACEHOLDER_REGEX.findAll(scopeText)) {
+            match.groupValues[1].toIntOrNull()?.let { needed.add(it) }
+        }
+        if (needed.isEmpty()) return emptyList()
+        return images.filter { it.index in needed }.sortedBy { it.index }
+    }
+
     /**
-     * Prefers user-selected text when non-blank; otherwise falls back to visible body text.
+     * Resolves active context by priority:
+     * 1) User-selected text, 2) Extracted quiz items, 3) Full page DOM text fallback only.
      * Throws [IllegalStateException] if the snapshot carries an error or contains no readable text.
      */
     fun effectiveContextText(): String {
         if (!error.isNullOrBlank()) {
             throw IllegalStateException(error)
         }
-        val preferred = if (selectedText.isNotBlank()) selectedText else bodyText
-        val trimmed = preferred.trim()
+        val trimmed = when (activeContextSource()) {
+            DomContextSource.SELECTION -> selectedText.trim()
+            DomContextSource.QUESTIONS -> formatQuestionsText(preferredQuestions())
+            DomContextSource.FULL_DOM -> bodyText.trim()
+        }
         if (trimmed.isEmpty()) {
             val iframeHint = if (crossOriginIframeCount > 0) {
                 "：检测到 $crossOriginIframeCount 个跨域 iframe，无法读取其内部内容"
@@ -48,7 +127,7 @@ data class DomSnapshot(
     fun warningMessage(): String? {
         if (!error.isNullOrBlank()) return error
         if (crossOriginIframeCount > 0) {
-            return "提示：检测到 $crossOriginIframeCount 个跨域 iframe，仅提取到主文档可见文本。"
+            return "提示：检测到 $crossOriginIframeCount 个跨域 iframe，仅提取到同源文档内容。"
         }
         return null
     }
@@ -60,11 +139,31 @@ data class DomSnapshot(
             for (opt in item.options) {
                 optArray.put(opt)
             }
+            val imgIdxArray = JSONArray()
+            for (imgIdx in item.imageIndices) {
+                imgIdxArray.put(imgIdx)
+            }
             quizArray.put(
                 JSONObject().apply {
                     put("question", item.question)
                     put("options", optArray)
                     put("type", item.type)
+                    put("inViewport", item.inViewport)
+                    put("imageIndices", imgIdxArray)
+                }
+            )
+        }
+        val imagesArray = JSONArray()
+        for (img in images) {
+            imagesArray.put(
+                JSONObject().apply {
+                    put("index", img.index)
+                    put("url", img.url)
+                    put("dataUrl", img.dataUrl)
+                    put("alt", img.alt)
+                    put("width", img.width)
+                    put("height", img.height)
+                    put("isFormula", img.isFormula)
                 }
             )
         }
@@ -78,6 +177,7 @@ data class DomSnapshot(
             put("capturedAtMs", capturedAtMs)
             if (error != null) put("error", error)
             put("extractedQuestions", quizArray)
+            put("images", imagesArray)
         }.toString()
     }
 
@@ -85,6 +185,19 @@ data class DomSnapshot(
         const val MAX_EXTRACTED_QUESTIONS = 15
         const val MAX_QUESTION_CHARS = 2000
         const val MAX_OPTIONS_PER_QUESTION = 12
+        const val MAX_CAPTURED_IMAGES = 12
+        const val MAX_INLINE_DATA_URL_CHARS = 90_000
+        const val MAX_TOTAL_INLINE_DATA_CHARS = 220_000
+
+        private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[图片(\d+)\]""")
+
+        fun questionTypeLabel(type: Int): String = when (type) {
+            0 -> "单选题"
+            1 -> "多选题"
+            2 -> "填空题"
+            3 -> "判断题"
+            else -> "问答题"
+        }
 
         fun parseQuizItems(array: JSONArray?): List<DomQuizItem> {
             if (array == null || array.length() == 0) return emptyList()
@@ -109,7 +222,67 @@ data class DomSnapshot(
                     emptyList()
                 }
                 val type = obj.optInt("type", 0).coerceIn(0, 4)
-                items.add(DomQuizItem(question = question, options = options, type = type))
+                val inViewport = obj.optBoolean("inViewport", true)
+                val imgArray = obj.optJSONArray("imageIndices")
+                val imageIndices = if (imgArray != null) {
+                    buildList {
+                        for (k in 0 until imgArray.length()) {
+                            val idx = imgArray.optInt(k, -1)
+                            if (idx > 0 && idx !in this) add(idx)
+                        }
+                    }
+                } else {
+                    emptyList()
+                }
+                items.add(
+                    DomQuizItem(
+                        question = question,
+                        options = options,
+                        type = type,
+                        inViewport = inViewport,
+                        imageIndices = imageIndices
+                    )
+                )
+            }
+            return items
+        }
+
+        fun parseImages(array: JSONArray?): List<DomImageItem> {
+            if (array == null || array.length() == 0) return emptyList()
+            val items = mutableListOf<DomImageItem>()
+            val seenIndices = hashSetOf<Int>()
+            var totalInlineChars = 0
+            for (i in 0 until array.length()) {
+                if (items.size >= MAX_CAPTURED_IMAGES) break
+                val obj = array.optJSONObject(i) ?: continue
+                val index = obj.optInt("index", -1)
+                if (index <= 0 || !seenIndices.add(index)) continue
+
+                val url = obj.optString("url", "").trim().take(2048)
+                val rawDataUrl = obj.optString("dataUrl", "").trim()
+                val safeDataUrl = if (
+                    rawDataUrl.isNotEmpty() &&
+                    rawDataUrl.length <= MAX_INLINE_DATA_URL_CHARS &&
+                    totalInlineChars + rawDataUrl.length <= MAX_TOTAL_INLINE_DATA_CHARS
+                ) {
+                    totalInlineChars += rawDataUrl.length
+                    rawDataUrl
+                } else {
+                    ""
+                }
+                if (url.isEmpty() && safeDataUrl.isEmpty()) continue
+
+                items.add(
+                    DomImageItem(
+                        index = index,
+                        url = url,
+                        dataUrl = safeDataUrl,
+                        alt = obj.optString("alt", "").trim().take(256),
+                        width = obj.optInt("width", 0).coerceAtLeast(0),
+                        height = obj.optInt("height", 0).coerceAtLeast(0),
+                        isFormula = obj.optBoolean("isFormula", false)
+                    )
+                )
             }
             return items
         }
@@ -123,6 +296,7 @@ data class DomSnapshot(
                 null
             }
             val quizItems = parseQuizItems(obj.optJSONArray("extractedQuestions"))
+            val imageItems = parseImages(obj.optJSONArray("images"))
             return DomSnapshot(
                 sourcePackage = obj.optString("sourcePackage", ""),
                 url = obj.optString("url", ""),
@@ -132,7 +306,8 @@ data class DomSnapshot(
                 crossOriginIframeCount = obj.optInt("crossOriginIframeCount", 0),
                 capturedAtMs = obj.optLong("capturedAtMs", 0L),
                 error = err,
-                extractedQuestions = quizItems
+                extractedQuestions = quizItems,
+                images = imageItems
             )
         }
 
@@ -147,7 +322,8 @@ data class DomSnapshot(
                 crossOriginIframeCount = 0,
                 capturedAtMs = System.currentTimeMillis(),
                 error = message,
-                extractedQuestions = emptyList()
+                extractedQuestions = emptyList(),
+                images = emptyList()
             )
         }
     }
