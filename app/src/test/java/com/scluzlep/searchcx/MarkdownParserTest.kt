@@ -375,4 +375,24 @@ class MarkdownParserTest {
         assertEquals(2, subNum.indentLevel)
         assertEquals("1.", subNum.number)
     }
+
+    @Test
+    fun handlesIncompleteStreamingMathWithoutThrowing() {
+        val incompleteSamples = listOf(
+            """\sqrt[\""",
+            """\sqrt[3""",
+            """\frac{1""",
+            """\left(""",
+            """\begin{cases} x & x > 0 \\""",
+            """x^{""",
+            """a_{""",
+            """\text{\"""
+        )
+        for (sample in incompleteSamples) {
+            val node = MarkdownParser.parseLatexMath(sample)
+            assertNotNull(node)
+            assertNotNull(MarkdownParser.prettifyLatexMath(sample))
+            assertTrue(MarkdownParser.parse("$$\n$sample\n$$").isNotEmpty())
+        }
+    }
 }

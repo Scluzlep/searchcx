@@ -1388,7 +1388,7 @@ object MarkdownParser {
             var bracketDepth = 1
             while (pos < input.length && bracketDepth > 0) {
                 when (input[pos]) {
-                    '\\' -> pos += 2
+                    '\\' -> if (pos + 1 < input.length) pos += 2 else pos++
                     '{' -> {
                         braceDepth++
                         pos++
