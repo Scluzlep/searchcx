@@ -1,5 +1,6 @@
 package com.scluzlep.searchcx.tiku
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -115,6 +116,8 @@ class TikuAdapterClient(
                 async {
                     provider to runCatching {
                         probeDirectProvider(provider, probe, config.tokens.tokenFor(provider).trim())
+                    }.onFailure { err ->
+                        if (err is CancellationException) throw err
                     }
                 }
             }.awaitAll()
@@ -169,6 +172,8 @@ class TikuAdapterClient(
                 return emptyResult(req, "远端服务 HTTP ${httpResp.code}")
             }
             parseRemoteResponse(req, httpResp.body)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             emptyResult(req, e.message ?: "远端检索失败")
         }
@@ -261,6 +266,8 @@ class TikuAdapterClient(
                     val token = config.tokens.tokenFor(provider).trim()
                     provider to runCatching {
                         queryDirectProvider(provider, req, token)
+                    }.onFailure { err ->
+                        if (err is CancellationException) throw err
                     }
                 }
             }.awaitAll()

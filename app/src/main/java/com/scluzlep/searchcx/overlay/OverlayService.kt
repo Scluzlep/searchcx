@@ -58,6 +58,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -891,6 +892,7 @@ class OverlayService : Service() {
             runCatching {
                 tikuClient.searchBatch(requests, tikuCfg)
             }.onSuccess { results ->
+                ensureActive()
                 val formatted = TikuMarkdownFormatter.formatForDisplay(results, tikuCfg.mode.displayName)
                 conversationHistory.add(ChatTurn("assistant", formatted))
                 updateAssistantMessage(assistantMsgId, formatted, "", streaming = false)
@@ -1115,7 +1117,10 @@ class OverlayService : Service() {
             if (willRunTikuPresearch) {
                 presearchResults = runCatching {
                     tikuClient.searchBatch(presearchQuestions, tikuCfg)
+                }.onFailure { err ->
+                    if (err is CancellationException) throw err
                 }.getOrElse { emptyList() }
+                ensureActive()
 
                 if (tikuCfg.skipAiOnHit && presearchResults.isNotEmpty() && presearchResults.all { it.isHit() }) {
                     val formatted = TikuMarkdownFormatter.formatForDisplay(presearchResults, tikuCfg.mode.displayName)
@@ -1195,6 +1200,7 @@ class OverlayService : Service() {
                     )
                 }
             }.onSuccess {
+                ensureActive()
                 val finalContent = textSb.toString()
                 val finalReasoning = reasoningSb.toString()
                 if (finalContent.isEmpty() && finalReasoning.isEmpty()) {

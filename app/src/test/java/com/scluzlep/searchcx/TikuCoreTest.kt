@@ -10,6 +10,9 @@ import com.scluzlep.searchcx.tiku.TikuProvider
 import com.scluzlep.searchcx.tiku.TikuProviderTokens
 import com.scluzlep.searchcx.tiku.TikuQuestionType
 import com.scluzlep.searchcx.tiku.TikuSearchRequest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -493,6 +496,31 @@ class TikuCoreTest {
         val missMd = TikuMarkdownFormatter.formatForDisplay(listOf(missRes), "内置聚合")
         assertTrue(missMd.contains("未命中"))
         assertFalse(containsEmoji(missMd))
+    }
+
+    @Test
+    fun cancellationPropagatesFromDirectAndRemoteSearchWithoutSwallowing() = runBlocking {
+        val slowClient = TikuAdapterClient(mockOkHttp { req ->
+            Thread.sleep(300)
+            jsonResponse(req, """{"code":1,"data":"北京"}""")
+        })
+        val req = TikuSearchRequest("测试取消", type = TikuQuestionType.QA.code)
+
+        for (mode in listOf(TikuMode.DIRECT_BUILTIN, TikuMode.REMOTE_ADAPTER)) {
+            val cfg = TikuConfig(mode = mode)
+            val job = async {
+                slowClient.searchBatch(listOf(req), cfg)
+            }
+            delay(40)
+            job.cancel()
+            var caughtCancel = false
+            try {
+                job.await()
+            } catch (_: CancellationException) {
+                caughtCancel = true
+            }
+            assertTrue("Expected CancellationException in $mode", caughtCancel)
+        }
     }
 
     private data class CapturedHttp(val request: Request, val body: String)
