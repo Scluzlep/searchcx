@@ -37,11 +37,18 @@ data class DomSnapshot(
     val capturedAtMs: Long,
     val error: String? = null,
     val extractedQuestions: List<DomQuizItem> = emptyList(),
-    val images: List<DomImageItem> = emptyList()
+    val images: List<DomImageItem> = emptyList(),
+    val hasObfuscatedFont: Boolean = false
 ) {
     fun hasError(): Boolean = !error.isNullOrBlank()
 
     fun isSelectionMode(): Boolean = selectedText.isNotBlank()
+
+    fun availableContextSources(): List<DomContextSource> = buildList {
+        if (selectedText.isNotBlank()) add(DomContextSource.SELECTION)
+        if (extractedQuestions.any { it.question.isNotBlank() }) add(DomContextSource.QUESTIONS)
+        if (bodyText.isNotBlank()) add(DomContextSource.FULL_DOM)
+    }
 
     fun activeContextSource(): DomContextSource = when {
         selectedText.isNotBlank() -> DomContextSource.SELECTION
@@ -54,6 +61,35 @@ data class DomSnapshot(
         if (valid.isEmpty()) return emptyList()
         val visible = valid.filter { it.inViewport }
         return if (visible.isNotEmpty()) visible else valid
+    }
+
+    fun questionsForSelection(selectedIndices: Set<Int>? = null): List<DomQuizItem> {
+        if (selectedIndices == null) return preferredQuestions()
+        val valid = extractedQuestions.filter { it.question.isNotBlank() }
+        if (valid.isEmpty() || selectedIndices.isEmpty()) return emptyList()
+        return selectedIndices
+            .asSequence()
+            .filter { it in valid.indices }
+            .distinct()
+            .sorted()
+            .map { valid[it] }
+            .toList()
+    }
+
+    private fun resolveEffectiveSource(
+        sourceOverride: DomContextSource?,
+        selectedQuestionIndices: Set<Int>?
+    ): DomContextSource {
+        val candidate = sourceOverride ?: activeContextSource()
+        val candidateHasContent = when (candidate) {
+            DomContextSource.SELECTION -> selectedText.isNotBlank()
+            DomContextSource.QUESTIONS -> questionsForSelection(selectedQuestionIndices).isNotEmpty()
+            DomContextSource.FULL_DOM -> bodyText.isNotBlank()
+        }
+        if (candidateHasContent || sourceOverride == null) {
+            return candidate
+        }
+        return activeContextSource()
     }
 
     fun formatQuestionsText(questions: List<DomQuizItem> = preferredQuestions()): String {
@@ -79,14 +115,18 @@ data class DomSnapshot(
         return sb.toString().trim()
     }
 
-    fun activeImages(): List<DomImageItem> {
+    fun activeImages(
+        sourceOverride: DomContextSource? = null,
+        selectedQuestionIndices: Set<Int>? = null,
+        excludedImageIndices: Set<Int> = emptySet()
+    ): List<DomImageItem> {
         if (images.isEmpty()) return emptyList()
         val needed = LinkedHashSet<Int>()
-        val source = activeContextSource()
+        val source = resolveEffectiveSource(sourceOverride, selectedQuestionIndices)
         val scopeText = when (source) {
             DomContextSource.SELECTION -> selectedText
             DomContextSource.QUESTIONS -> {
-                val chosen = preferredQuestions()
+                val chosen = questionsForSelection(selectedQuestionIndices)
                 chosen.forEach { needed.addAll(it.imageIndices) }
                 formatQuestionsText(chosen)
             }
@@ -95,22 +135,29 @@ data class DomSnapshot(
         for (match in IMAGE_PLACEHOLDER_REGEX.findAll(scopeText)) {
             match.groupValues[1].toIntOrNull()?.let { needed.add(it) }
         }
+        if (excludedImageIndices.isNotEmpty()) {
+            needed.removeAll(excludedImageIndices)
+        }
         if (needed.isEmpty()) return emptyList()
         return images.filter { it.index in needed }.sortedBy { it.index }
     }
 
     /**
-     * Resolves active context by priority:
+     * Resolves active context by priority (or explicit source/question selection override):
      * 1) User-selected text, 2) Extracted quiz items, 3) Full page DOM text fallback only.
      * Throws [IllegalStateException] if the snapshot carries an error or contains no readable text.
      */
-    fun effectiveContextText(): String {
+    fun effectiveContextText(
+        sourceOverride: DomContextSource? = null,
+        selectedQuestionIndices: Set<Int>? = null
+    ): String {
         if (!error.isNullOrBlank()) {
             throw IllegalStateException(error)
         }
-        val trimmed = when (activeContextSource()) {
+        val source = resolveEffectiveSource(sourceOverride, selectedQuestionIndices)
+        val trimmed = when (source) {
             DomContextSource.SELECTION -> selectedText.trim()
-            DomContextSource.QUESTIONS -> formatQuestionsText(preferredQuestions())
+            DomContextSource.QUESTIONS -> formatQuestionsText(questionsForSelection(selectedQuestionIndices))
             DomContextSource.FULL_DOM -> bodyText.trim()
         }
         if (trimmed.isEmpty()) {
@@ -126,10 +173,15 @@ data class DomSnapshot(
 
     fun warningMessage(): String? {
         if (!error.isNullOrBlank()) return error
-        if (crossOriginIframeCount > 0) {
-            return "提示：检测到 $crossOriginIframeCount 个跨域 iframe，仅提取到同源文档内容。"
+        val warnings = mutableListOf<String>()
+        if (hasObfuscatedFont) {
+            warnings.add("检测到混淆字体，文字可能存在映射错乱，建议结合视觉附图或截屏框选。")
         }
-        return null
+        if (crossOriginIframeCount > 0) {
+            warnings.add("检测到 $crossOriginIframeCount 个跨域 iframe，仅提取到同源文档内容。")
+        }
+        if (warnings.isEmpty()) return null
+        return "提示：" + warnings.joinToString(" ")
     }
 
     fun toJson(): String {
@@ -178,6 +230,7 @@ data class DomSnapshot(
             if (error != null) put("error", error)
             put("extractedQuestions", quizArray)
             put("images", imagesArray)
+            put("hasObfuscatedFont", hasObfuscatedFont)
         }.toString()
     }
 
@@ -186,8 +239,8 @@ data class DomSnapshot(
         const val MAX_QUESTION_CHARS = 2000
         const val MAX_OPTIONS_PER_QUESTION = 12
         const val MAX_CAPTURED_IMAGES = 12
-        const val MAX_INLINE_DATA_URL_CHARS = 90_000
-        const val MAX_TOTAL_INLINE_DATA_CHARS = 220_000
+        const val MAX_INLINE_DATA_URL_CHARS = 500_000
+        const val MAX_TOTAL_INLINE_DATA_CHARS = 2_200_000
 
         private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[图片(\d+)\]""")
 
@@ -307,7 +360,8 @@ data class DomSnapshot(
                 capturedAtMs = obj.optLong("capturedAtMs", 0L),
                 error = err,
                 extractedQuestions = quizItems,
-                images = imageItems
+                images = imageItems,
+                hasObfuscatedFont = obj.optBoolean("hasObfuscatedFont", false)
             )
         }
 
@@ -323,7 +377,8 @@ data class DomSnapshot(
                 capturedAtMs = System.currentTimeMillis(),
                 error = message,
                 extractedQuestions = emptyList(),
-                images = emptyList()
+                images = emptyList(),
+                hasObfuscatedFont = false
             )
         }
     }

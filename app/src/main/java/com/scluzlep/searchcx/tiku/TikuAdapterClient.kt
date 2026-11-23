@@ -28,7 +28,8 @@ import kotlin.coroutines.resumeWithException
  * and direct concurrent built-in aggregation across upstream HTTP providers.
  */
 class TikuAdapterClient(
-    private val httpClient: OkHttpClient = defaultHttpClient()
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    private val cache: TikuSearchCache = TikuSearchCache()
 ) {
 
     suspend fun searchOne(req: TikuSearchRequest, config: TikuConfig): TikuSearchResult {
@@ -36,12 +37,27 @@ class TikuAdapterClient(
         if (cleanQuestion.isBlank()) {
             return emptyResult(req, "题干为空，无法检索")
         }
-        val normalizedReq = req.copy(question = cleanQuestion)
+        val cleanOptions = req.options
+            .map { OcsQuestionExtractor.stripOptionPrefix(it) }
+            .filter { it.isNotBlank() }
+        val normalizedReq = req.copy(
+            question = cleanQuestion,
+            options = cleanOptions
+        )
 
-        return when (config.mode) {
+        val cacheKey = TikuSearchCache.buildKey(normalizedReq, config)
+        cache.get(cacheKey)?.let { cached ->
+            return cached
+        }
+
+        val result = when (config.mode) {
             TikuMode.REMOTE_ADAPTER -> searchRemote(normalizedReq, config)
             TikuMode.DIRECT_BUILTIN -> searchDirectBuiltin(normalizedReq, config)
         }
+        if (result.isHit()) {
+            cache.put(cacheKey, result)
+        }
+        return result
     }
 
     suspend fun searchBatch(

@@ -1,6 +1,9 @@
 package com.scluzlep.searchcx
 
+import com.scluzlep.searchcx.overlay.DomImagePreviewItem
+import com.scluzlep.searchcx.overlay.DomQuestionChipItem
 import com.scluzlep.searchcx.overlay.OverlayPromptBuilder
+import com.scluzlep.searchcx.overlay.OverlayUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -211,5 +214,95 @@ class OverlayPromptBuilderTest {
         assertEquals("DOM HTML", turn4EmptyInput.contextBadge)
         assertEquals("请解析：\n\n[页面上下文]\n$domTurn3", turn4EmptyInput.apiPrompt)
         assertFalse(turn4EmptyInput.visibleUserText.contains(domTurn3))
+    }
+
+    @Test
+    fun quoteBadgeForStatusHandlesAllDomCaptureModesAndClipboard() {
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_DOM,
+            OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 正文")
+        )
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_DOM,
+            OverlayPromptBuilder.quoteBadgeForStatus("  已抓取 · 正文  ")
+        )
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_QUESTIONS,
+            OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 题目")
+        )
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_SELECTION,
+            OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 选区")
+        )
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_CLIPBOARD,
+            OverlayPromptBuilder.quoteBadgeForStatus("已粘贴")
+        )
+        assertEquals(
+            OverlayPromptBuilder.CONTEXT_BADGE_DOM,
+            OverlayPromptBuilder.quoteBadgeForStatus("")
+        )
+    }
+
+    @Test
+    fun formatQuoteBadgeFormatsOptionalQuestionAndImageCounts() {
+        assertEquals("DOM HTML", OverlayPromptBuilder.formatQuoteBadge("DOM HTML"))
+        assertEquals(
+            "题目内容 · 2 题",
+            OverlayPromptBuilder.formatQuoteBadge("题目内容", questionCount = 2)
+        )
+        assertEquals(
+            "DOM HTML · 3 图",
+            OverlayPromptBuilder.formatQuoteBadge("DOM HTML", imageCount = 3)
+        )
+        assertEquals(
+            "页面选区 · 1 题 · 4 图",
+            OverlayPromptBuilder.formatQuoteBadge("页面选区", questionCount = 1, imageCount = 4)
+        )
+        assertEquals(
+            "DOM HTML · 2 题 · 1 图",
+            OverlayPromptBuilder.formatQuoteBadge("   ", questionCount = 2, imageCount = 1)
+        )
+    }
+
+    @Test
+    fun sanitizeForTikuSearchRemovesImagePlaceholdersAndNormalizesWhitespace() {
+        assertEquals(
+            "已知函数 f(x) 且 连续",
+            OverlayPromptBuilder.sanitizeForTikuSearch("  [图片1] 已知函数 f(x) [图片12] 且 \t [图片] 连续  ")
+        )
+        assertEquals("", OverlayPromptBuilder.sanitizeForTikuSearch("  [图片1] \t [图片2]  "))
+        assertEquals(
+            "已知导数定义\nA. 1\nB. 2",
+            OverlayPromptBuilder.sanitizeForTikuSearch("已知导数定义\nA. 1\nB. 2")
+        )
+    }
+
+    @Test
+    fun overlayUiStateAndPreviewModelsHaveExpectedDefaults() {
+        val state = OverlayUiState()
+        assertFalse(state.isContextPreviewExpanded)
+        assertNull(state.activeContextSource)
+        assertTrue(state.availableContextSources.isEmpty())
+        assertTrue(state.questionChips.isEmpty())
+        assertTrue(state.domImagePreviews.isEmpty())
+        assertFalse(state.hasObfuscatedFont)
+
+        val imgItem = DomImagePreviewItem(
+            index = 1,
+            bitmap = null,
+            isFormula = true,
+            label = "公式1"
+        )
+        assertTrue(imgItem.included)
+
+        val qChip = DomQuestionChipItem(
+            index = 0,
+            label = "第1题",
+            preview = "题干",
+            selected = true
+        )
+        assertEquals(0, qChip.index)
+        assertTrue(qChip.selected)
     }
 }

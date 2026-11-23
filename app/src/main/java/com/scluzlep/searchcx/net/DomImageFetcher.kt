@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -105,6 +106,41 @@ class DomImageFetcher(
         )
     }
 
+    /**
+     * Decodes a compact white-composited thumbnail [Bitmap] for UI preview cards.
+     */
+    suspend fun decodeThumbnail(
+        item: DomImageItem,
+        pageUrl: String,
+        maxSidePx: Int = DEFAULT_THUMBNAIL_MAX_SIDE_PX
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        if (maxSidePx <= 0) return@withContext null
+        try {
+            if (item.dataUrl.isNotBlank()) {
+                val parsed = parseDataUrl(item.dataUrl)
+                if (parsed != null) {
+                    val bmp = decodeThumbnailBytes(parsed.bytes, maxSidePx)
+                    if (bmp != null) return@withContext bmp
+                }
+            }
+
+            val url = item.url.trim()
+            if (!url.startsWith("http://", ignoreCase = true) &&
+                !url.startsWith("https://", ignoreCase = true)
+            ) {
+                return@withContext null
+            }
+
+            val downloaded = downloadBytes(url, buildReferer(url, pageUrl)) ?: return@withContext null
+            ensureActive()
+            decodeThumbnailBytes(downloaded, maxSidePx)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private suspend fun downloadBytes(imageUrl: String, referer: String?): ByteArray? {
         val builder = Request.Builder()
             .url(imageUrl)
@@ -169,12 +205,57 @@ class DomImageFetcher(
     }
 
     private fun normalizeImageBytes(rawBytes: ByteArray): ChatImage? {
+        val canvasBmp = decodeAndCompositeOnWhite(rawBytes) { w, h ->
+            computeTargetSize(w, h)
+        } ?: return null
+        return try {
+            val out = ByteArrayOutputStream()
+            val mime = if (maxOf(canvasBmp.width, canvasBmp.height) <= PNG_THRESHOLD_PX) {
+                canvasBmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+                "image/png"
+            } else {
+                canvasBmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+                "image/jpeg"
+            }
+            val encoded = Base64.getEncoder().encodeToString(out.toByteArray())
+            if (encoded.isBlank()) null else ChatImage(mimeType = mime, base64 = encoded)
+        } finally {
+            if (!canvasBmp.isRecycled) canvasBmp.recycle()
+        }
+    }
+
+    private fun decodeThumbnailBytes(rawBytes: ByteArray, maxSidePx: Int): Bitmap? {
+        if (rawBytes.isEmpty() || rawBytes.size > MAX_DOWNLOAD_BYTES || maxSidePx <= 0) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        val sampleSize = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            computeInSampleSize(bounds.outWidth, bounds.outHeight, maxSidePx)
+        } else {
+            1
+        }
+        return decodeAndCompositeOnWhite(rawBytes, inSampleSize = sampleSize) { w, h ->
+            computeThumbnailTargetSize(w, h, maxSidePx)
+        }
+    }
+
+    private fun decodeAndCompositeOnWhite(
+        rawBytes: ByteArray,
+        inSampleSize: Int = 1,
+        computeSize: (Int, Int) -> Pair<Int, Int>
+    ): Bitmap? {
         if (rawBytes.isEmpty() || rawBytes.size > MAX_DOWNLOAD_BYTES) return null
-        val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
+        val decoded = if (inSampleSize > 1) {
+            val opts = BitmapFactory.Options().apply { this.inSampleSize = inSampleSize }
+            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, opts)
+        } else {
+            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+        } ?: return null
+
         var scaled: Bitmap? = null
         var composited: Bitmap? = null
         return try {
-            val (targetW, targetH) = computeTargetSize(decoded.width, decoded.height)
+            if (decoded.width <= 0 || decoded.height <= 0) return null
+            val (targetW, targetH) = computeSize(decoded.width, decoded.height)
             if (targetW <= 0 || targetH <= 0) return null
 
             val sourceBmp = if (targetW != decoded.width || targetH != decoded.height) {
@@ -189,19 +270,12 @@ class DomImageFetcher(
             val canvas = Canvas(canvasBmp)
             canvas.drawColor(Color.WHITE)
             canvas.drawBitmap(sourceBmp, 0f, 0f, null)
-
-            val out = ByteArrayOutputStream()
-            val mime = if (maxOf(targetW, targetH) <= PNG_THRESHOLD_PX) {
-                canvasBmp.compress(Bitmap.CompressFormat.PNG, 100, out)
-                "image/png"
-            } else {
-                canvasBmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-                "image/jpeg"
-            }
-            val encoded = Base64.getEncoder().encodeToString(out.toByteArray())
-            if (encoded.isBlank()) null else ChatImage(mimeType = mime, base64 = encoded)
-        } finally {
+            canvasBmp
+        } catch (t: Throwable) {
             composited?.let { if (!it.isRecycled) it.recycle() }
+            if (t is CancellationException) throw t
+            null
+        } finally {
             scaled?.let { if (it !== decoded && !it.isRecycled) it.recycle() }
             if (!decoded.isRecycled) decoded.recycle()
         }
@@ -209,6 +283,7 @@ class DomImageFetcher(
 
     companion object {
         const val DEFAULT_MAX_IMAGES = 8
+        const val DEFAULT_THUMBNAIL_MAX_SIDE_PX = 180
         const val MIN_FORMULA_SIDE_PX = 36
         const val MIN_UPSCALED_SIDE_PX = 40
         const val MAX_IMAGE_SIDE_PX = 1280
@@ -258,6 +333,25 @@ class DomImageFetcher(
             return dstW to dstH
         }
 
+        fun computeThumbnailTargetSize(width: Int, height: Int, maxSidePx: Int): Pair<Int, Int> {
+            if (width <= 0 || height <= 0 || maxSidePx <= 0) return width to height
+            val maxSide = maxOf(width, height)
+            if (maxSide <= maxSidePx) return width to height
+            val scale = maxSidePx.toDouble() / maxSide.toDouble()
+            val dstW = (width * scale).roundToInt().coerceIn(1, maxSidePx)
+            val dstH = (height * scale).roundToInt().coerceIn(1, maxSidePx)
+            return dstW to dstH
+        }
+
+        private fun computeInSampleSize(width: Int, height: Int, maxSidePx: Int): Int {
+            var sampleSize = 1
+            val maxDim = maxOf(width, height)
+            while (maxDim / (sampleSize * 2) >= maxSidePx) {
+                sampleSize *= 2
+            }
+            return sampleSize
+        }
+
         fun buildReferer(imageUrl: String, pageUrl: String): String? {
             val parsedPage = pageUrl.trim().toHttpUrlOrNull()
             if (parsedPage != null) {
@@ -276,14 +370,23 @@ class DomImageFetcher(
             return "$scheme://$host$portPart/"
         }
 
-        fun buildImageMappingHint(resolved: List<ResolvedDomImage>): String {
+        fun buildImageMappingHint(
+            resolved: List<ResolvedDomImage>,
+            attachmentOffset: Int = 0
+        ): String {
             if (resolved.isEmpty()) return ""
+            val safeOffset = attachmentOffset.coerceAtLeast(0)
             val sb = StringBuilder()
             sb.append("[图片索引对应关系]\n")
+            if (safeOffset == 1) {
+                sb.append("- 第 1 张附图：用户截屏框选图像\n")
+            } else if (safeOffset > 1) {
+                sb.append("- 第 1-").append(safeOffset).append(" 张附图：用户截屏框选图像\n")
+            }
             resolved.forEachIndexed { attachIdx, item ->
                 val kind = if (item.isFormula) "公式图" else "题图"
                 sb.append("- [图片").append(item.index).append("]：第 ")
-                    .append(attachIdx + 1).append(" 张附图 · ").append(kind)
+                    .append(safeOffset + attachIdx + 1).append(" 张附图 · ").append(kind)
                 if (item.alt.isNotBlank()) {
                     sb.append(" · alt: ").append(item.alt)
                 }

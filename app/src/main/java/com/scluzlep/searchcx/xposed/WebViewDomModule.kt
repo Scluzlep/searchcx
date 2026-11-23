@@ -7,27 +7,42 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Base64
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebView
 import com.scluzlep.searchcx.data.DomSnapshot
+import com.scluzlep.searchcx.ipc.DomChunkAssembler
 import com.scluzlep.searchcx.ipc.DomIpcContract
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
+import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayOutputStream
 import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
 import java.util.WeakHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 
 /**
  * Modern Xposed / libxposed API 102 module for read-only WebView DOM & selection extraction.
@@ -39,6 +54,10 @@ class WebViewDomModule : XposedModule() {
     private val trackedWebViews = WeakHashMap<Any, Long>()
     private val activeHandles = linkedMapOf<String, XposedInterface.HookHandle>()
     private val hookedClassLoaders = WeakHashMap<ClassLoader, Boolean>()
+    private val ioExecutorLock = Any()
+
+    @Volatile
+    private var ioExecutor: ExecutorService? = null
 
     @Volatile
     private var isSystemServerProcess: Boolean = false
@@ -91,6 +110,7 @@ class WebViewDomModule : XposedModule() {
     override fun onHotReloading(param: XposedModuleInterface.HotReloadingParam): Boolean {
         unregisterCaptureReceiver()
         mainHandler.removeCallbacksAndMessages(null)
+        shutdownIoExecutor()
         resumedActivityRef = null
         hostAppContext = null
         synchronized(trackedWebViews) {
@@ -459,6 +479,23 @@ class WebViewDomModule : XposedModule() {
         return false
     }
 
+    private fun getOrCreateIoExecutor(): ExecutorService {
+        ioExecutor?.takeIf { !it.isShutdown && !it.isTerminated }?.let { return it }
+        synchronized(ioExecutorLock) {
+            ioExecutor?.takeIf { !it.isShutdown && !it.isTerminated }?.let { return it }
+            return Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "scx-dom-io").apply { isDaemon = true }
+            }.also { ioExecutor = it }
+        }
+    }
+
+    private fun shutdownIoExecutor() {
+        synchronized(ioExecutorLock) {
+            ioExecutor?.shutdownNow()
+            ioExecutor = null
+        }
+    }
+
     private fun handleCaptureRequest(appCtx: Context, requestId: String) {
         mainHandler.post {
             val visibleOrForeground = isProcessVisibleOrForeground(appCtx)
@@ -468,7 +505,7 @@ class WebViewDomModule : XposedModule() {
             if (bestWebView == null) {
                 // Only main foreground process emits a missing-WebView snapshot so background/child processes stay quiet.
                 if (visibleOrForeground && !currentProcessName.contains(':')) {
-                    sendSnapshot(
+                    sendSnapshotBroadcast(
                         appCtx,
                         requestId,
                         DomSnapshot.errorSnapshot(
@@ -529,11 +566,13 @@ class WebViewDomModule : XposedModule() {
     private fun extractFromWebView(appCtx: Context, requestId: String, webView: Any) {
         val fallbackUrl = reflectStringGetter(webView, "getUrl")
         val fallbackTitle = reflectStringGetter(webView, "getTitle")
+        val userAgent = resolveWebViewUserAgent(webView)
+        val x5ClassLoader = if (webView is WebView) null else webView.javaClass.classLoader
         val completed = AtomicBoolean(false)
 
         val timeoutRunnable = Runnable {
             if (completed.compareAndSet(false, true)) {
-                sendSnapshot(
+                sendSnapshotBroadcast(
                     appCtx,
                     requestId,
                     DomSnapshot.errorSnapshot(
@@ -548,44 +587,461 @@ class WebViewDomModule : XposedModule() {
         val onResult: (String?) -> Unit = { rawResult ->
             mainHandler.removeCallbacks(timeoutRunnable)
             if (completed.compareAndSet(false, true)) {
-                val snapshot = parseJsResult(
-                    sourcePackage = appCtx.packageName,
-                    fallbackUrl = fallbackUrl,
-                    fallbackTitle = fallbackTitle,
-                    rawResult = rawResult
-                )
-                sendSnapshot(appCtx, requestId, snapshot)
+                val decodedResult = decodeJsObject(rawResult)
+                decodedResult.onFailure { err ->
+                    val msg = if (err.message == EMPTY_JS_RESULT_MARKER) {
+                        "WebView 返回空结果"
+                    } else {
+                        "解析 DOM JSON 失败：${err.message}"
+                    }
+                    sendSnapshotBroadcast(
+                        appCtx,
+                        requestId,
+                        DomSnapshot.errorSnapshot(appCtx.packageName, msg)
+                            .copy(url = fallbackUrl, title = fallbackTitle)
+                    )
+                }.onSuccess { decodedJson ->
+                    val svgJobId = decodedJson.optString("svgJobId", "").trim()
+                    if (svgJobId.isNotBlank()) {
+                        pollSvgJob(
+                            appCtx = appCtx,
+                            requestId = requestId,
+                            webView = webView,
+                            decodedJson = decodedJson,
+                            svgJobId = svgJobId,
+                            userAgent = userAgent,
+                            fallbackUrl = fallbackUrl,
+                            fallbackTitle = fallbackTitle,
+                            x5ClassLoader = x5ClassLoader,
+                            attempt = 1
+                        )
+                    } else {
+                        finalizeAndBroadcast(
+                            appCtx = appCtx,
+                            requestId = requestId,
+                            decodedJson = decodedJson,
+                            userAgent = userAgent,
+                            fallbackUrl = fallbackUrl,
+                            fallbackTitle = fallbackTitle,
+                            x5ClassLoader = x5ClassLoader
+                        )
+                    }
+                }
             }
         }
 
+        evaluateAnyWebView(
+            webView = webView,
+            script = EXTRACT_DOM_JS,
+            onResult = onResult,
+            onError = { err ->
+                mainHandler.removeCallbacks(timeoutRunnable)
+                if (completed.compareAndSet(false, true)) {
+                    val prefix = if (webView is WebView) "读取 WebView DOM 失败" else "读取 X5 WebView DOM 失败"
+                    sendSnapshotBroadcast(
+                        appCtx,
+                        requestId,
+                        DomSnapshot.errorSnapshot(appCtx.packageName, "$prefix：${err.message}")
+                            .copy(url = fallbackUrl, title = fallbackTitle)
+                    )
+                }
+            }
+        )
+    }
+
+    private fun pollSvgJob(
+        appCtx: Context,
+        requestId: String,
+        webView: Any,
+        decodedJson: JSONObject,
+        svgJobId: String,
+        userAgent: String,
+        fallbackUrl: String,
+        fallbackTitle: String,
+        x5ClassLoader: ClassLoader?,
+        attempt: Int
+    ) {
+        val quotedId = JSONObject.quote(svgJobId)
+        val forceCleanup = attempt >= SVG_MAX_POLL_ATTEMPTS
+        val pollScript = """
+            (function() {
+              try {
+                var jobs = window.__scxSvgJobs;
+                var jid = $quotedId;
+                if (!jobs || !jobs[jid]) return JSON.stringify({ done: true, results: {} });
+                var j = jobs[jid];
+                if (j.done || $forceCleanup) {
+                  var res = j.results || {};
+                  delete jobs[jid];
+                  return JSON.stringify({ done: true, results: res });
+                }
+                return JSON.stringify({ done: false, results: j.results || {} });
+              } catch (e) {
+                return JSON.stringify({ done: true, results: {} });
+              }
+            })();
+        """.trimIndent()
+
+        mainHandler.postDelayed({
+            evaluateAnyWebView(
+                webView = webView,
+                script = pollScript,
+                onResult = { pollRaw ->
+                    val pollObj = decodeJsObject(pollRaw).getOrNull()
+                    val done = pollObj?.optBoolean("done", true) ?: true
+                    val resultsObj = pollObj?.optJSONObject("results")
+                    if (done || attempt >= SVG_MAX_POLL_ATTEMPTS) {
+                        mergeSvgJobResults(decodedJson, resultsObj)
+                        finalizeAndBroadcast(
+                            appCtx = appCtx,
+                            requestId = requestId,
+                            decodedJson = decodedJson,
+                            userAgent = userAgent,
+                            fallbackUrl = fallbackUrl,
+                            fallbackTitle = fallbackTitle,
+                            x5ClassLoader = x5ClassLoader
+                        )
+                    } else {
+                        pollSvgJob(
+                            appCtx = appCtx,
+                            requestId = requestId,
+                            webView = webView,
+                            decodedJson = decodedJson,
+                            svgJobId = svgJobId,
+                            userAgent = userAgent,
+                            fallbackUrl = fallbackUrl,
+                            fallbackTitle = fallbackTitle,
+                            x5ClassLoader = x5ClassLoader,
+                            attempt = attempt + 1
+                        )
+                    }
+                },
+                onError = {
+                    finalizeAndBroadcast(
+                        appCtx = appCtx,
+                        requestId = requestId,
+                        decodedJson = decodedJson,
+                        userAgent = userAgent,
+                        fallbackUrl = fallbackUrl,
+                        fallbackTitle = fallbackTitle,
+                        x5ClassLoader = x5ClassLoader
+                    )
+                }
+            )
+        }, SVG_POLL_INTERVAL_MS)
+    }
+
+    private fun mergeSvgJobResults(decodedJson: JSONObject, resultsObj: JSONObject?) {
+        if (resultsObj == null) return
+        val images = decodedJson.optJSONArray("images") ?: return
+        var usedInlineChars = totalInlineChars(images)
+        for (i in 0 until images.length()) {
+            val imgObj = images.optJSONObject(i) ?: continue
+            if (imgObj.optString("dataUrl", "").isNotBlank()) continue
+            val idxKey = imgObj.optInt("index", -1).toString()
+            val pngDataUrl = resultsObj.optString(idxKey, "").trim()
+            if (!pngDataUrl.startsWith("data:image/")) continue
+            if (pngDataUrl.length <= MAX_INLINE_PER_IMG_CHARS &&
+                usedInlineChars + pngDataUrl.length <= MAX_TOTAL_INLINE_CHARS
+            ) {
+                imgObj.put("dataUrl", pngDataUrl)
+                usedInlineChars += pngDataUrl.length
+            }
+        }
+    }
+
+    private fun finalizeAndBroadcast(
+        appCtx: Context,
+        requestId: String,
+        decodedJson: JSONObject,
+        userAgent: String,
+        fallbackUrl: String,
+        fallbackTitle: String,
+        x5ClassLoader: ClassLoader?
+    ) {
+        if (!needsHttpPrefetch(decodedJson)) {
+            val snapshot = buildSnapshotFromJsonObject(
+                sourcePackage = appCtx.packageName,
+                fallbackUrl = fallbackUrl,
+                fallbackTitle = fallbackTitle,
+                decoded = decodedJson
+            )
+            sendSnapshotBroadcast(appCtx, requestId, snapshot)
+            return
+        }
+
+        getOrCreateIoExecutor().execute {
+            runCatching {
+                prefetchHttpImages(
+                    decodedJson = decodedJson,
+                    userAgent = userAgent,
+                    fallbackUrl = fallbackUrl,
+                    x5ClassLoader = x5ClassLoader
+                )
+            }.onFailure { err ->
+                log(Log.WARN, TAG, "Host image prefetch failed; falling back to URLs", err)
+            }
+            val snapshot = runCatching {
+                buildSnapshotFromJsonObject(
+                    sourcePackage = appCtx.packageName,
+                    fallbackUrl = fallbackUrl,
+                    fallbackTitle = fallbackTitle,
+                    decoded = decodedJson
+                )
+            }.getOrElse { err ->
+                DomSnapshot.errorSnapshot(appCtx.packageName, "构建 DOM 快照失败：${err.message}")
+                    .copy(url = fallbackUrl, title = fallbackTitle)
+            }
+            sendSnapshotBroadcast(appCtx, requestId, snapshot)
+        }
+    }
+
+    private fun needsHttpPrefetch(decodedJson: JSONObject): Boolean {
+        val images = decodedJson.optJSONArray("images") ?: return false
+        for (i in 0 until images.length()) {
+            val obj = images.optJSONObject(i) ?: continue
+            if (obj.optString("dataUrl", "").isBlank() && isHttpUrl(obj.optString("url", "").trim())) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun totalInlineChars(images: JSONArray): Int {
+        var total = 0
+        for (i in 0 until images.length()) {
+            val obj = images.optJSONObject(i) ?: continue
+            total += obj.optString("dataUrl", "").length
+        }
+        return total
+    }
+
+    private fun prefetchHttpImages(
+        decodedJson: JSONObject,
+        userAgent: String,
+        fallbackUrl: String,
+        x5ClassLoader: ClassLoader?
+    ) {
+        val images = decodedJson.optJSONArray("images") ?: return
+        val pageUrl = decodedJson.optString("url").ifBlank { fallbackUrl }
+        var totalInlineChars = totalInlineChars(images)
+        var fetchedCount = 0
+
+        for (i in 0 until images.length()) {
+            if (Thread.currentThread().isInterrupted) break
+            if (fetchedCount >= MAX_PREFETCH_IMAGES) break
+            if (totalInlineChars >= MAX_TOTAL_INLINE_CHARS - 2048) break
+
+            val obj = images.optJSONObject(i) ?: continue
+            if (obj.optString("dataUrl", "").isNotBlank()) continue
+            val imgUrl = obj.optString("url", "").trim()
+            if (!isHttpUrl(imgUrl)) continue
+
+            fetchedCount++
+            val rawBytes = runCatching {
+                downloadImageBytes(imgUrl, pageUrl, userAgent, x5ClassLoader)
+            }.getOrNull() ?: continue
+            val remainingBudget = MAX_TOTAL_INLINE_CHARS - totalInlineChars
+            val dataUrl = runCatching {
+                normalizeAndEncodeImage(rawBytes, remainingBudget)
+            }.getOrNull() ?: continue
+
+            obj.put("dataUrl", dataUrl)
+            totalInlineChars += dataUrl.length
+        }
+    }
+
+    private fun downloadImageBytes(
+        imageUrl: String,
+        pageUrl: String,
+        userAgent: String,
+        x5ClassLoader: ClassLoader?
+    ): ByteArray? {
+        var currentUrl = imageUrl
+        var redirects = 0
+        while (redirects <= MAX_PREFETCH_REDIRECTS) {
+            if (Thread.currentThread().isInterrupted || !isHttpUrl(currentUrl)) return null
+            val conn = (URL(currentUrl).openConnection() as? HttpURLConnection) ?: return null
+            try {
+                conn.connectTimeout = PREFETCH_TIMEOUT_MS
+                conn.readTimeout = PREFETCH_TIMEOUT_MS
+                conn.instanceFollowRedirects = false
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("User-Agent", userAgent.ifBlank { DEFAULT_USER_AGENT })
+                conn.setRequestProperty("Accept", "image/avif,image/webp,image/png,image/*,*/*;q=0.8")
+                buildOriginReferer(pageUrl, currentUrl)?.let { conn.setRequestProperty("Referer", it) }
+                getCookieSafely(currentUrl, x5ClassLoader)?.takeIf { it.isNotBlank() }?.let {
+                    conn.setRequestProperty("Cookie", it)
+                }
+
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val location = conn.getHeaderField("Location")
+                    if (location.isNullOrBlank() || redirects >= MAX_PREFETCH_REDIRECTS) {
+                        return null
+                    }
+                    val nextUrl = runCatching { URI(currentUrl).resolve(location).toString() }.getOrNull()
+                        ?: return null
+                    currentUrl = nextUrl
+                    redirects++
+                    continue
+                }
+                if (code !in 200..299) {
+                    return null
+                }
+                val contentLength = conn.contentLengthLong
+                if (contentLength > MAX_PREFETCH_RAW_BYTES) {
+                    return null
+                }
+                return conn.inputStream.use { input ->
+                    val buffer = ByteArrayOutputStream()
+                    val chunk = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        if (Thread.currentThread().isInterrupted) return@use null
+                        val read = input.read(chunk)
+                        if (read < 0) break
+                        total += read
+                        if (total > MAX_PREFETCH_RAW_BYTES) return@use null
+                        buffer.write(chunk, 0, read)
+                    }
+                    buffer.toByteArray()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+        return null
+    }
+
+    private fun getCookieSafely(url: String, x5ClassLoader: ClassLoader?): String? {
+        val systemCookie = runCatching {
+            CookieManager.getInstance().getCookie(url)
+        }.getOrNull()
+        if (!systemCookie.isNullOrBlank()) {
+            return systemCookie
+        }
+        if (x5ClassLoader != null) {
+            val x5Cookie = runCatching {
+                val cmClass = Class.forName("com.tencent.smtt.sdk.CookieManager", false, x5ClassLoader)
+                val cm = cmClass.getMethod("getInstance").invoke(null)
+                cmClass.getMethod("getCookie", String::class.java).invoke(cm, url) as? String
+            }.getOrNull()
+            if (!x5Cookie.isNullOrBlank()) {
+                return x5Cookie
+            }
+        }
+        return null
+    }
+
+    private fun buildOriginReferer(pageUrl: String, imgUrl: String): String? {
+        return extractOrigin(pageUrl) ?: extractOrigin(imgUrl)
+    }
+
+    private fun extractOrigin(rawUrl: String): String? {
+        val trimmed = rawUrl.trim()
+        if (!isHttpUrl(trimmed)) return null
+        return runCatching {
+            val uri = URI(trimmed)
+            val scheme = uri.scheme?.lowercase() ?: return@runCatching null
+            val host = uri.host?.takeIf { it.isNotBlank() } ?: return@runCatching null
+            val port = uri.port
+            val defaultPort = (scheme == "http" && port == 80) || (scheme == "https" && port == 443)
+            val portPart = if (port <= 0 || defaultPort) "" else ":$port"
+            "$scheme://$host$portPart/"
+        }.getOrNull()
+    }
+
+    private fun normalizeAndEncodeImage(rawBytes: ByteArray, remainingTotalBudget: Int): String? {
+        if (rawBytes.isEmpty() || rawBytes.size > MAX_PREFETCH_RAW_BYTES) return null
+        val maxAllowed = minOf(MAX_INLINE_PER_IMG_CHARS, remainingTotalBudget)
+        if (maxAllowed < 64) return null
+
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, boundsOpts)
+        if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return null
+
+        var sampleSize = 1
+        val rawMaxSide = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+        while (rawMaxSide / (sampleSize * 2) >= PREFETCH_MAX_SIDE_PX) {
+            sampleSize *= 2
+        }
+
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts) ?: return null
+        var scaled: Bitmap? = null
+        var composited: Bitmap? = null
+        return try {
+            val srcW = decoded.width
+            val srcH = decoded.height
+            if (srcW <= 0 || srcH <= 0) return null
+
+            val minSide = minOf(srcW, srcH)
+            val maxSide = maxOf(srcW, srcH)
+            var scale = 1.0
+            if (minSide < PREFETCH_MIN_FORMULA_SIDE_PX) {
+                scale = minOf(PREFETCH_MAX_UPSCALE_FACTOR, PREFETCH_MIN_UPSCALED_SIDE_PX.toDouble() / minSide.toDouble())
+            }
+            if (maxSide * scale > PREFETCH_MAX_SIDE_PX) {
+                scale = PREFETCH_MAX_SIDE_PX.toDouble() / maxSide.toDouble()
+            }
+            val dstW = (srcW * scale).roundToInt().coerceAtLeast(1)
+            val dstH = (srcH * scale).roundToInt().coerceAtLeast(1)
+
+            val sourceBmp = if (dstW != srcW || dstH != srcH) {
+                Bitmap.createScaledBitmap(decoded, dstW, dstH, true).also { scaled = it }
+            } else {
+                decoded
+            }
+
+            val canvasBmp = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
+                .also { composited = it }
+            val canvas = Canvas(canvasBmp)
+            canvas.drawColor(Color.WHITE)
+            canvas.drawBitmap(sourceBmp, 0f, 0f, null)
+
+            fun encode(format: Bitmap.CompressFormat, quality: Int, mime: String): String? {
+                val out = ByteArrayOutputStream()
+                if (!canvasBmp.compress(format, quality, out)) return null
+                val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+                if (b64.isEmpty()) return null
+                return "data:$mime;base64,$b64"
+            }
+
+            var dataUrl = if (dstW <= PREFETCH_PNG_THRESHOLD_PX && dstH <= PREFETCH_PNG_THRESHOLD_PX) {
+                encode(Bitmap.CompressFormat.PNG, 100, "image/png")
+            } else {
+                encode(Bitmap.CompressFormat.JPEG, PREFETCH_JPEG_QUALITY_HIGH, "image/jpeg")
+            }
+            if (dataUrl == null || dataUrl.length > maxAllowed) {
+                dataUrl = encode(Bitmap.CompressFormat.JPEG, PREFETCH_JPEG_QUALITY_FALLBACK, "image/jpeg")
+                    ?.takeIf { it.length <= maxAllowed }
+            }
+            dataUrl
+        } finally {
+            composited?.let { if (!it.isRecycled) it.recycle() }
+            scaled?.let { if (it !== decoded && !it.isRecycled) it.recycle() }
+            if (!decoded.isRecycled) decoded.recycle()
+        }
+    }
+
+    private fun isHttpUrl(url: String): Boolean {
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun evaluateAnyWebView(
+        webView: Any,
+        script: String,
+        onResult: (String?) -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
         if (webView is WebView) {
             runCatching {
-                webView.evaluateJavascript(EXTRACT_DOM_JS) { raw -> onResult(raw) }
-            }.onFailure { err ->
-                mainHandler.removeCallbacks(timeoutRunnable)
-                if (completed.compareAndSet(false, true)) {
-                    sendSnapshot(
-                        appCtx,
-                        requestId,
-                        DomSnapshot.errorSnapshot(appCtx.packageName, "读取 WebView DOM 失败：${err.message}")
-                            .copy(url = fallbackUrl, title = fallbackTitle)
-                    )
-                }
-            }
+                webView.evaluateJavascript(script) { raw -> onResult(raw) }
+            }.onFailure(onError)
         } else {
-            evaluateX5WebView(webView, EXTRACT_DOM_JS) { raw ->
-                onResult(raw)
-            }.onFailure { err ->
-                mainHandler.removeCallbacks(timeoutRunnable)
-                if (completed.compareAndSet(false, true)) {
-                    sendSnapshot(
-                        appCtx,
-                        requestId,
-                        DomSnapshot.errorSnapshot(appCtx.packageName, "读取 X5 WebView DOM 失败：${err.message}")
-                            .copy(url = fallbackUrl, title = fallbackTitle)
-                    )
-                }
-            }
+            evaluateX5WebView(webView, script, onResult).onFailure(onError)
         }
     }
 
@@ -607,6 +1063,17 @@ class WebViewDomModule : XposedModule() {
         evalMethod.invoke(x5WebView, script, proxy)
     }
 
+    private fun resolveWebViewUserAgent(webView: Any): String {
+        return runCatching {
+            if (webView is WebView) {
+                webView.settings.userAgentString.orEmpty()
+            } else {
+                val settings = webView.javaClass.getMethod("getSettings").invoke(webView)
+                settings?.javaClass?.getMethod("getUserAgentString")?.invoke(settings)?.toString().orEmpty()
+            }
+        }.getOrDefault("").ifBlank { DEFAULT_USER_AGENT }
+    }
+
     private fun reflectStringGetter(target: Any, methodName: String): String {
         return runCatching {
             (target as? WebView)?.let { wv ->
@@ -620,55 +1087,77 @@ class WebViewDomModule : XposedModule() {
         }.getOrDefault("")
     }
 
-    private fun parseJsResult(
-        sourcePackage: String,
-        fallbackUrl: String,
-        fallbackTitle: String,
-        rawResult: String?
-    ): DomSnapshot {
+    private fun decodeJsObject(rawResult: String?): Result<JSONObject> {
         if (rawResult.isNullOrBlank() || rawResult == "null") {
-            return DomSnapshot.errorSnapshot(sourcePackage, "WebView 返回空结果")
-                .copy(url = fallbackUrl, title = fallbackTitle)
+            return Result.failure(IllegalStateException(EMPTY_JS_RESULT_MARKER))
         }
         return runCatching {
-            val decoded = when (val parsed = JSONTokener(rawResult).nextValue()) {
+            when (val parsed = JSONTokener(rawResult).nextValue()) {
                 is JSONObject -> parsed
                 is String -> JSONObject(parsed)
                 else -> JSONObject(rawResult)
             }
-            val url = decoded.optString("url").ifBlank { fallbackUrl }
-            val title = decoded.optString("title").ifBlank { fallbackTitle }
-            val selected = decoded.optString("selectedText").take(DomIpcContract.MAX_BODY_CHARS)
-            val body = decoded.optString("bodyText").take(DomIpcContract.MAX_BODY_CHARS)
-            val iframeCount = decoded.optInt("crossOriginIframeCount", 0).coerceAtLeast(0)
-            val extractedQuestions = DomSnapshot.parseQuizItems(decoded.optJSONArray("extractedQuestions"))
-            val images = DomSnapshot.parseImages(decoded.optJSONArray("images"))
-            DomSnapshot(
-                sourcePackage = sourcePackage,
-                url = url,
-                title = title,
-                selectedText = selected,
-                bodyText = body,
-                crossOriginIframeCount = iframeCount,
-                capturedAtMs = System.currentTimeMillis(),
-                error = null,
-                extractedQuestions = extractedQuestions,
-                images = images
-            )
-        }.getOrElse { err ->
-            DomSnapshot.errorSnapshot(sourcePackage, "解析 DOM JSON 失败：${err.message}")
-                .copy(url = fallbackUrl, title = fallbackTitle)
         }
     }
 
-    private fun sendSnapshot(appCtx: Context, requestId: String, snapshot: DomSnapshot) {
+    private fun buildSnapshotFromJsonObject(
+        sourcePackage: String,
+        fallbackUrl: String,
+        fallbackTitle: String,
+        decoded: JSONObject
+    ): DomSnapshot {
+        val url = decoded.optString("url").ifBlank { fallbackUrl }
+        val title = decoded.optString("title").ifBlank { fallbackTitle }
+        val selected = decoded.optString("selectedText").take(DomIpcContract.MAX_BODY_CHARS)
+        val body = decoded.optString("bodyText").take(DomIpcContract.MAX_BODY_CHARS)
+        val iframeCount = decoded.optInt("crossOriginIframeCount", 0).coerceAtLeast(0)
+        val hasObfuscatedFont = decoded.optBoolean("hasObfuscatedFont", false)
+        val extractedQuestions = DomSnapshot.parseQuizItems(decoded.optJSONArray("extractedQuestions"))
+        val images = DomSnapshot.parseImages(decoded.optJSONArray("images"))
+        return DomSnapshot(
+            sourcePackage = sourcePackage,
+            url = url,
+            title = title,
+            selectedText = selected,
+            bodyText = body,
+            crossOriginIframeCount = iframeCount,
+            capturedAtMs = System.currentTimeMillis(),
+            error = null,
+            extractedQuestions = extractedQuestions,
+            images = images,
+            hasObfuscatedFont = hasObfuscatedFont
+        )
+    }
+
+    private fun sendSnapshotBroadcast(appCtx: Context, requestId: String, snapshot: DomSnapshot) {
         runCatching {
-            val reply = Intent(DomIpcContract.ACTION_DOM_SNAPSHOT).apply {
-                setPackage(DomIpcContract.ASSISTANT_PACKAGE)
-                putExtra(DomIpcContract.EXTRA_REQUEST_ID, requestId)
-                putExtra(DomIpcContract.EXTRA_PAYLOAD_JSON, snapshot.toJson())
+            var payloadJson = snapshot.toJson()
+            if (payloadJson.length > DomIpcContract.MAX_ASSEMBLED_PAYLOAD_CHARS) {
+                val strippedImages = snapshot.images.map { img ->
+                    if (img.url.isNotBlank()) img.copy(dataUrl = "") else img
+                }
+                payloadJson = snapshot.copy(images = strippedImages).toJson()
+                if (payloadJson.length > DomIpcContract.MAX_ASSEMBLED_PAYLOAD_CHARS) {
+                    payloadJson = DomSnapshot.errorSnapshot(
+                        snapshot.sourcePackage,
+                        "页面 DOM 数据过大，请改用选中题目或截屏框选",
+                        url = snapshot.url,
+                        title = snapshot.title
+                    ).toJson()
+                }
             }
-            appCtx.sendBroadcast(reply)
+            val chunks = DomChunkAssembler.splitPayload(payloadJson, DomIpcContract.MAX_CHUNK_CHARS)
+            val total = chunks.size
+            for ((index, chunk) in chunks.withIndex()) {
+                val reply = Intent(DomIpcContract.ACTION_DOM_SNAPSHOT).apply {
+                    setPackage(DomIpcContract.ASSISTANT_PACKAGE)
+                    putExtra(DomIpcContract.EXTRA_REQUEST_ID, requestId)
+                    putExtra(DomIpcContract.EXTRA_CHUNK_INDEX, index)
+                    putExtra(DomIpcContract.EXTRA_CHUNK_TOTAL, total)
+                    putExtra(DomIpcContract.EXTRA_PAYLOAD_JSON, chunk)
+                }
+                appCtx.sendBroadcast(reply)
+            }
         }.onFailure { err ->
             log(Log.WARN, TAG, "Failed to send snapshot broadcast", err)
         }
@@ -683,7 +1172,25 @@ class WebViewDomModule : XposedModule() {
 
     companion object {
         private const val TAG = "WebViewDomModule"
+        private const val EMPTY_JS_RESULT_MARKER = "__SCX_EMPTY_JS_RESULT__"
         private const val EVALUATE_TIMEOUT_MS = 3500L
+        private const val SVG_POLL_INTERVAL_MS = 250L
+        private const val SVG_MAX_POLL_ATTEMPTS = 4
+        private const val MAX_PREFETCH_IMAGES = 8
+        private const val MAX_PREFETCH_REDIRECTS = 3
+        private const val PREFETCH_TIMEOUT_MS = 3000
+        private const val MAX_PREFETCH_RAW_BYTES = 4 * 1024 * 1024
+        private const val MAX_INLINE_PER_IMG_CHARS = 450_000
+        private const val MAX_TOTAL_INLINE_CHARS = 1_800_000
+        private const val PREFETCH_MIN_FORMULA_SIDE_PX = 36
+        private const val PREFETCH_MIN_UPSCALED_SIDE_PX = 40
+        private const val PREFETCH_MAX_UPSCALE_FACTOR = 3.0
+        private const val PREFETCH_MAX_SIDE_PX = 1280
+        private const val PREFETCH_PNG_THRESHOLD_PX = 320
+        private const val PREFETCH_JPEG_QUALITY_HIGH = 85
+        private const val PREFETCH_JPEG_QUALITY_FALLBACK = 72
+        private const val DEFAULT_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
 
         private val EXTRACT_DOM_JS = """
             (function() {
@@ -693,9 +1200,10 @@ class WebViewDomModule : XposedModule() {
                 var maxQuestionChars = ${DomSnapshot.MAX_QUESTION_CHARS};
                 var maxOptions = ${DomSnapshot.MAX_OPTIONS_PER_QUESTION};
                 var maxImages = ${DomSnapshot.MAX_CAPTURED_IMAGES};
-                var maxInlinePerImg = 85000;
-                var maxTotalInline = 180000;
+                var maxInlinePerImg = 450000;
+                var maxTotalInline = 1800000;
                 var crossCount = 0;
+                var hasObfuscatedFont = false;
                 var selectedRaw = '';
                 var chunks = [];
                 var rawQuestions = [];
@@ -740,6 +1248,13 @@ class WebViewDomModule : XposedModule() {
                     .replace(/ *\n */g, '\n')
                     .replace(/\n{3,}/g, '\n\n')
                     .trim();
+                }
+
+                function getClassName(el) {
+                  if (!el) return '';
+                  if (typeof el.className === 'string') return el.className;
+                  if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+                  return (el.getAttribute && el.getAttribute('class')) || '';
                 }
 
                 function stripOptionPrefix(s) {
@@ -907,7 +1422,7 @@ class WebViewDomModule : XposedModule() {
 
                 function tryExtractMathFromElement(el) {
                   var tag = (el.tagName || '').toUpperCase();
-                  var cls = typeof el.className === 'string' ? el.className : '';
+                  var cls = getClassName(el);
 
                   var attrTex = el.getAttribute('data-latex') || el.getAttribute('data-tex') || el.getAttribute('data-formula') || el.getAttribute('data-math') || '';
                   if (attrTex && attrTex.trim() && tag !== 'IMG') {
@@ -976,7 +1491,7 @@ class WebViewDomModule : XposedModule() {
                     return formatMathDelimiter(directTex, false);
                   }
                   var alt = (img.getAttribute('alt') || '').trim();
-                  var cls = typeof img.className === 'string' ? img.className : '';
+                  var cls = getClassName(img);
                   if (alt && alt.length <= 300) {
                     var looksExplicitTex = (/^\$[\s\S]+\$$/.test(alt) || /\\[a-zA-Z]+/.test(alt) || /[\^_{}]/.test(alt));
                     var looksMathClass = /formula|math|latex|equation|kfformula/i.test(cls + ' ' + resolvedUrl);
@@ -1043,23 +1558,66 @@ class WebViewDomModule : XposedModule() {
                   return ' ' + tokenPrefix + idx + tokenSuffix + ' ';
                 }
 
+                function getComputedStyleSafe(el) {
+                  try {
+                    var view = el && el.ownerDocument && el.ownerDocument.defaultView;
+                    if (view && el.isConnected) return view.getComputedStyle(el);
+                  } catch (eCs) {}
+                  return null;
+                }
+
+                function hasCxSecretFontFamily(el, cs) {
+                  try {
+                    var style = cs || getComputedStyleSafe(el);
+                    return !!(style && style.fontFamily && /cxsecret/i.test(style.fontFamily));
+                  } catch (eFont) {
+                    return false;
+                  }
+                }
+
                 function isElementHidden(el) {
                   if (!el || el.nodeType !== 1) return false;
                   if (el.hidden) return true;
                   var st = el.style;
                   if (st && (st.display === 'none' || st.visibility === 'hidden')) return true;
-                  try {
-                    var view = el.ownerDocument && el.ownerDocument.defaultView;
-                    if (view && el.isConnected) {
-                      var cs = view.getComputedStyle(el);
-                      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return true;
-                    }
-                  } catch (eCs) {}
+                  var cs = getComputedStyleSafe(el);
+                  if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return true;
+                  var cls = getClassName(el);
+                  if ((cls && /\bfont-cxsecret\b/.test(cls)) || hasCxSecretFontFamily(el, cs)) {
+                    hasObfuscatedFont = true;
+                  }
                   return false;
                 }
 
+                function serializeStandaloneSvg(svgNode, w, h) {
+                  try {
+                    if (!svgNode || typeof XMLSerializer === 'undefined') return '';
+                    var clone = svgNode.cloneNode(true);
+                    if (!clone.getAttribute('xmlns')) {
+                      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+                    }
+                    if (!clone.getAttribute('xmlns:xlink') && /xlink:href/i.test(svgNode.outerHTML || '')) {
+                      clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+                    }
+                    var origW = parseFloat(svgNode.getAttribute('width') || '0');
+                    var origH = parseFloat(svgNode.getAttribute('height') || '0');
+                    if (!clone.getAttribute('viewBox') && origW > 0 && origH > 0 && (origW !== w || origH !== h)) {
+                      clone.setAttribute('viewBox', '0 0 ' + origW + ' ' + origH);
+                    }
+                    clone.setAttribute('width', String(w));
+                    clone.setAttribute('height', String(h));
+                    var xml = new XMLSerializer().serializeToString(clone);
+                    if (xml && xml.indexOf('xmlns="http://www.w3.org/2000/svg"') < 0) {
+                      xml = xml.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+                    }
+                    return xml || '';
+                  } catch (eSvgSer) {
+                    return '';
+                  }
+                }
+
                 function isNoisyUiImage(img, url, w, h) {
-                  var cls = typeof img.className === 'string' ? img.className : '';
+                  var cls = getClassName(img);
                   var isFormulaHint = /formula|latex|math|katex|equation|kfformula|jyeoo|codecogs/i.test(url + ' ' + cls);
                   if (!isFormulaHint) {
                     if ((w > 0 && w <= 4) || (h > 0 && h <= 4)) return true;
@@ -1081,7 +1639,7 @@ class WebViewDomModule : XposedModule() {
                   if (opts && opts.skipNavChrome && NOISE_LAYOUT_TAGS[tag]) return;
                   if (isElementHidden(node)) return;
 
-                  var cls = typeof node.className === 'string' ? node.className : '';
+                  var cls = getClassName(node);
                   if (cls && (/\bkatex-html\b/.test(cls) || /\bMathJax_Preview\b/.test(cls) || /\bMJX_Assistive_MathML\b/.test(cls))) return;
                   if (tag === 'MJX-ASSISTIVE-MML') return;
 
@@ -1120,6 +1678,50 @@ class WebViewDomModule : XposedModule() {
                     if (cw >= 24 && ch >= 16) {
                       parts.push(registerImage(node, '', '', cw, ch, ch <= 80, null));
                     }
+                    return;
+                  }
+
+                  if (tag === 'SVG') {
+                    if (cls && /\b(katex|MathJax|mjx-)/i.test(cls)) return;
+                    if (opts && opts.isOption && /\b(radio|checkbox|icon-check)\b/i.test(cls)) return;
+                    var sRect = node.getBoundingClientRect ? node.getBoundingClientRect() : { width: 0, height: 0 };
+                    var attrW = parseFloat(node.getAttribute('width') || '0') || 0;
+                    var attrH = parseFloat(node.getAttribute('height') || '0') || 0;
+                    var sw = Math.round(sRect.width) || Math.round(attrW) || 0;
+                    var sh = Math.round(sRect.height) || Math.round(attrH) || 0;
+                    if ((sw <= 0 || sh <= 0) && node.getAttribute('viewBox')) {
+                      var vbParts = String(node.getAttribute('viewBox')).trim().split(/[\s,]+/);
+                      if (vbParts.length === 4) {
+                        if (sw <= 0) sw = Math.round(parseFloat(vbParts[2]) || 0);
+                        if (sh <= 0) sh = Math.round(parseFloat(vbParts[3]) || 0);
+                      }
+                    }
+                    if (sw < 24 || sh < 20) return;
+                    if (sw <= 28 && sh <= 28 && /\b(icon|btn-icon|close-icon|arrow|caret|spinner|loading)\b/i.test(cls)) return;
+                    var hasShape = false;
+                    try {
+                      hasShape = !!node.querySelector('path, circle, rect, line, polygon, polyline, ellipse, text');
+                    } catch (eSvgQ) {}
+                    if (!hasShape) return;
+                    var svgXml = serializeStandaloneSvg(node, sw, sh);
+                    if (!svgXml) return;
+                    var svgAlt = node.getAttribute('aria-label') || node.getAttribute('title') || '';
+                    if (!svgAlt) {
+                      try {
+                        var titleEl = node.querySelector('title');
+                        if (titleEl && titleEl.textContent) svgAlt = titleEl.textContent;
+                      } catch (eTitle) {}
+                    }
+                    var svgToken = registerImage(node, '', svgAlt, sw, sh, sh <= 80, null);
+                    var svgIdxMatch = /__SCX_IMG_(\d+)__/.exec(svgToken);
+                    if (svgIdxMatch) {
+                      var svgRawIdx = parseInt(svgIdxMatch[1], 10);
+                      if (rawImages[svgRawIdx]) {
+                        rawImages[svgRawIdx].isSvg = true;
+                        rawImages[svgRawIdx].svgXml = svgXml;
+                      }
+                    }
+                    parts.push(svgToken);
                     return;
                   }
 
@@ -1260,6 +1862,149 @@ class WebViewDomModule : XposedModule() {
                   return r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
                 }
 
+                function findObfuscatedFontElement(root) {
+                  if (!root || root.nodeType !== 1) return null;
+                  var cls = getClassName(root);
+                  if (/\bfont-cxsecret\b/.test(cls) || hasCxSecretFontFamily(root, null)) {
+                    return root;
+                  }
+                  try {
+                    var byCls = root.querySelector('.font-cxsecret');
+                    if (byCls && !isElementHidden(byCls)) return byCls;
+                  } catch (eQ) {}
+                  try {
+                    var all = root.getElementsByTagName('*');
+                    var limit = Math.min(all.length, 80);
+                    for (var i = 0; i < limit; i++) {
+                      var child = all[i];
+                      if (!child || isElementHidden(child)) continue;
+                      if (hasCxSecretFontFamily(child, null)) return child;
+                    }
+                  } catch (eAll) {}
+                  return null;
+                }
+
+                function wrapCanvasLines(ctx, text, maxWidth) {
+                  var outLines = [];
+                  var paragraphs = String(text || '').split('\n');
+                  for (var p = 0; p < paragraphs.length; p++) {
+                    var para = paragraphs[p];
+                    if (!para) {
+                      outLines.push('');
+                      continue;
+                    }
+                    var line = '';
+                    for (var i = 0; i < para.length; i++) {
+                      var ch = para.charAt(i);
+                      var testLine = line + ch;
+                      if (line && ctx.measureText(testLine).width > maxWidth) {
+                        var lastSpace = line.lastIndexOf(' ');
+                        if (lastSpace > Math.floor(line.length * 0.5) && /[A-Za-z0-9]/.test(ch)) {
+                          outLines.push(line.slice(0, lastSpace));
+                          line = line.slice(lastSpace + 1) + ch;
+                        } else {
+                          outLines.push(line);
+                          line = ch;
+                        }
+                      } else {
+                        line = testLine;
+                      }
+                    }
+                    if (line) outLines.push(line);
+                  }
+                  return outLines;
+                }
+
+                function renderObfuscatedQuestionCanvas(doc, fontEl, stem, opts) {
+                  try {
+                    var targetDoc = (doc && doc.createElement) ? doc : document;
+                    var canvas = targetDoc.createElement('canvas');
+                    if (!canvas || !canvas.getContext) return null;
+                    var ctx = canvas.getContext('2d');
+                    if (!ctx) return null;
+
+                    var cs = getComputedStyleSafe(fontEl);
+                    var rawSize = cs ? parseFloat(cs.fontSize) : 16;
+                    if (!rawSize || isNaN(rawSize)) rawSize = 16;
+                    var fontPx = Math.max(18, Math.min(28, Math.round(rawSize * 1.25)));
+                    var fStyle = (cs && cs.fontStyle && cs.fontStyle !== 'normal') ? (cs.fontStyle + ' ') : '';
+                    var fWeight = (cs && cs.fontWeight && cs.fontWeight !== '400' && cs.fontWeight !== 'normal') ? (cs.fontWeight + ' ') : '';
+                    var fFamily = (cs && cs.fontFamily) ? cs.fontFamily : 'sans-serif';
+                    if (!/sans-serif|serif/i.test(fFamily)) {
+                      fFamily = fFamily + ', sans-serif';
+                    }
+                    var fontSpec = fStyle + fWeight + fontPx + 'px ' + fFamily;
+
+                    var cleanStem = String(stem || '').replace(/__SCX_IMG_\d+__/g, '[图]').trim();
+                    var linesInput = [];
+                    if (cleanStem) linesInput.push(cleanStem);
+                    if (opts && opts.length) {
+                      for (var i = 0; i < opts.length; i++) {
+                        var letter = String.fromCharCode(65 + i);
+                        var cleanOpt = String(opts[i] || '').replace(/__SCX_IMG_\d+__/g, '[图]').trim();
+                        if (cleanOpt) linesInput.push(letter + '. ' + cleanOpt);
+                      }
+                    }
+                    var fullText = linesInput.join('\n');
+                    if (!fullText || !fullText.trim()) return null;
+
+                    var canvasW = 680;
+                    var padding = 20;
+                    var lineHeight = Math.round(fontPx * 1.45);
+                    canvas.width = canvasW;
+                    canvas.height = 64;
+                    ctx.font = fontSpec;
+
+                    var wrapped = wrapCanvasLines(ctx, fullText, canvasW - padding * 2);
+                    if (!wrapped || wrapped.length === 0) return null;
+                    if (wrapped.length > 48) wrapped = wrapped.slice(0, 48);
+
+                    var canvasH = Math.min(1800, padding * 2 + wrapped.length * lineHeight);
+                    if (canvasH < 40) canvasH = 40;
+
+                    canvas.width = canvasW;
+                    canvas.height = canvasH;
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.fillRect(0, 0, canvasW, canvasH);
+                    ctx.font = fontSpec;
+                    ctx.fillStyle = '#111111';
+                    ctx.textBaseline = 'top';
+
+                    for (var li = 0; li < wrapped.length; li++) {
+                      var y = padding + li * lineHeight;
+                      if (y + lineHeight > canvasH) break;
+                      ctx.fillText(wrapped[li], padding, y);
+                    }
+
+                    var hasInk = false;
+                    try {
+                      var imgData = ctx.getImageData(0, 0, canvasW, canvasH).data;
+                      var stride = 4 * 7;
+                      for (var px = 0; px < imgData.length; px += stride) {
+                        if (imgData[px] < 245 || imgData[px + 1] < 245 || imgData[px + 2] < 245) {
+                          hasInk = true;
+                          break;
+                        }
+                      }
+                    } catch (eImgData) {
+                      hasInk = true;
+                    }
+                    if (!hasInk) return null;
+
+                    var out = canvas.toDataURL('image/png');
+                    if (out && out.length > maxInlinePerImg) {
+                      out = canvas.toDataURL('image/jpeg', 0.85);
+                    }
+                    if (out && out.length > maxInlinePerImg) {
+                      out = canvas.toDataURL('image/jpeg', 0.72);
+                    }
+                    if (!out || out.length > maxInlinePerImg) return null;
+                    return { dataUrl: out, width: canvasW, height: canvasH };
+                  } catch (eRender) {
+                    return null;
+                  }
+                }
+
                 function extractQuestionsFromDoc(doc, parentVisible) {
                   if (!doc || rawQuestions.length >= maxQuestions) return;
                   var containers = doc.querySelectorAll(containerSelector);
@@ -1284,11 +2029,26 @@ class WebViewDomModule : XposedModule() {
                     if (seenQuestions[stem]) continue;
                     seenQuestions[stem] = true;
                     capturedEls.push(el);
+                    var qType = inferType(el, stem, opts);
+                    var qVisible = isElementInViewport(el, doc, parentVisible);
+                    var obfEl = findObfuscatedFontElement(el);
+                    if (obfEl) {
+                      hasObfuscatedFont = true;
+                      var rendered = renderObfuscatedQuestionCanvas(doc, obfEl, stem, opts);
+                      if (rendered && rendered.dataUrl) {
+                        var visualToken = registerImage(null, rendered.dataUrl, '混淆字体题目视觉图', rendered.width, rendered.height, false, null);
+                        var trimmedToken = visualToken.trim();
+                        if (stem.length + trimmedToken.length + 1 > maxQuestionChars) {
+                          stem = stem.slice(0, Math.max(0, maxQuestionChars - trimmedToken.length - 1));
+                        }
+                        stem = stem + '\n' + trimmedToken;
+                      }
+                    }
                     rawQuestions.push({
                       question: stem,
                       options: opts,
-                      type: inferType(el, stem, opts),
-                      inViewport: isElementInViewport(el, doc, parentVisible)
+                      type: qType,
+                      inViewport: qVisible
                     });
                   }
                 }
@@ -1298,6 +2058,11 @@ class WebViewDomModule : XposedModule() {
                   var selObj = (win && win.getSelection) ? win.getSelection() : (doc && doc.getSelection ? doc.getSelection() : null);
                   if (!selObj || selObj.rangeCount <= 0 || selObj.isCollapsed) return '';
                   var range = selObj.getRangeAt(0);
+                  var anc = range.commonAncestorContainer;
+                  if (anc && anc.nodeType === 3) anc = anc.parentElement;
+                  if (anc && !hasObfuscatedFont && findObfuscatedFontElement(anc)) {
+                    hasObfuscatedFont = true;
+                  }
                   var holder = doc.createElement('div');
                   holder.appendChild(range.cloneContents());
                   return extractRichText(holder, doc, { isOption: false });
@@ -1305,6 +2070,17 @@ class WebViewDomModule : XposedModule() {
 
                 function extractDocTree(doc, parentVisible) {
                   if (!doc) return;
+                  try {
+                    if (!hasObfuscatedFont) {
+                      var obfNodes = doc.querySelectorAll('.font-cxsecret');
+                      for (var obfIdx = 0; obfIdx < obfNodes.length; obfIdx++) {
+                        if (!isElementHidden(obfNodes[obfIdx])) {
+                          hasObfuscatedFont = true;
+                          break;
+                        }
+                      }
+                    }
+                  } catch (eObfDoc) {}
                   try {
                     if (!selectedRaw) {
                       var sel = extractSelectionRich(doc);
@@ -1449,8 +2225,8 @@ class WebViewDomModule : XposedModule() {
                     var dstW = Math.round(srcW * scale);
                     var dstH = Math.round(srcH * scale);
                     var maxSide = Math.max(dstW, dstH);
-                    if (maxSide > 900) {
-                      var shrink = 900 / maxSide;
+                    if (maxSide > 1280) {
+                      var shrink = 1280 / maxSide;
                       dstW = Math.max(1, Math.round(dstW * shrink));
                       dstH = Math.max(1, Math.round(dstH * shrink));
                     }
@@ -1499,6 +2275,100 @@ class WebViewDomModule : XposedModule() {
                   });
                 }
 
+                var svgTasks = [];
+                for (var si = 0; si < activeImageEntries.length; si++) {
+                  var sEntry = activeImageEntries[si];
+                  if (sEntry.item && sEntry.item.isSvg && sEntry.item.svgXml) {
+                    svgTasks.push({
+                      displayIdx: sEntry.displayIdx,
+                      svgXml: sEntry.item.svgXml,
+                      width: sEntry.item.width,
+                      height: sEntry.item.height
+                    });
+                    if (svgTasks.length >= 4) break;
+                  }
+                }
+
+                var svgJobId = '';
+                if (svgTasks.length > 0 && typeof Image !== 'undefined' && document.createElement) {
+                  svgJobId = 'scx_svg_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                  window.__scxSvgJobs = window.__scxSvgJobs || {};
+                  var svgJob = { done: false, results: {}, pending: svgTasks.length };
+                  window.__scxSvgJobs[svgJobId] = svgJob;
+
+                  setTimeout(function() {
+                    try {
+                      svgJob.done = true;
+                    } catch (eT1) {}
+                  }, 900);
+                  setTimeout(function() {
+                    try {
+                      if (window.__scxSvgJobs) delete window.__scxSvgJobs[svgJobId];
+                    } catch (eT2) {}
+                  }, 15000);
+
+                  for (var ti = 0; ti < svgTasks.length; ti++) {
+                    (function(task) {
+                      function finishTask() {
+                        svgJob.pending--;
+                        if (svgJob.pending <= 0) {
+                          svgJob.done = true;
+                        }
+                      }
+                      try {
+                        var img = new Image();
+                        img.onload = function() {
+                          try {
+                            var srcW = task.width || img.naturalWidth || img.width || 120;
+                            var srcH = task.height || img.naturalHeight || img.height || 80;
+                            var scale = 1;
+                            var minSide = Math.min(srcW, srcH);
+                            if (minSide > 0 && minSide < 36) {
+                              scale = Math.min(3, Math.ceil(40 / minSide));
+                            } else if (minSide > 0 && Math.max(srcW, srcH) <= 400) {
+                              scale = 2;
+                            }
+                            var dstW = Math.max(1, Math.round(srcW * scale));
+                            var dstH = Math.max(1, Math.round(srcH * scale));
+                            var maxSide = Math.max(dstW, dstH);
+                            if (maxSide > 1280) {
+                              var shrink = 1280 / maxSide;
+                              dstW = Math.max(1, Math.round(dstW * shrink));
+                              dstH = Math.max(1, Math.round(dstH * shrink));
+                            }
+                            var canvas = document.createElement('canvas');
+                            canvas.width = dstW;
+                            canvas.height = dstH;
+                            var ctx = canvas.getContext('2d');
+                            if (ctx) {
+                              ctx.fillStyle = '#FFFFFF';
+                              ctx.fillRect(0, 0, dstW, dstH);
+                              ctx.drawImage(img, 0, 0, dstW, dstH);
+                              var pngUrl = canvas.toDataURL('image/png');
+                              if (pngUrl && pngUrl.length > maxInlinePerImg) {
+                                pngUrl = canvas.toDataURL('image/jpeg', 0.85);
+                              }
+                              if (pngUrl && pngUrl.length > maxInlinePerImg) {
+                                pngUrl = canvas.toDataURL('image/jpeg', 0.72);
+                              }
+                              if (pngUrl && pngUrl.length <= maxInlinePerImg) {
+                                svgJob.results[String(task.displayIdx)] = pngUrl;
+                              }
+                            }
+                          } catch (eDraw) {}
+                          finishTask();
+                        };
+                        img.onerror = function() {
+                          finishTask();
+                        };
+                        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(task.svgXml);
+                      } catch (eInit) {
+                        finishTask();
+                      }
+                    })(svgTasks[ti]);
+                  }
+                }
+
                 if (finalSelected.length > maxLen) finalSelected = finalSelected.slice(0, maxLen);
                 if (finalBody.length > maxLen) finalBody = finalBody.slice(0, maxLen);
                 return JSON.stringify({
@@ -1507,6 +2377,8 @@ class WebViewDomModule : XposedModule() {
                   selectedText: finalSelected,
                   bodyText: finalBody,
                   crossOriginIframeCount: crossCount,
+                  hasObfuscatedFont: !!hasObfuscatedFont,
+                  svgJobId: svgJobId,
                   extractedQuestions: finalQuestions,
                   images: finalImages
                 });
@@ -1517,6 +2389,8 @@ class WebViewDomModule : XposedModule() {
                   selectedText: '',
                   bodyText: '',
                   crossOriginIframeCount: 0,
+                  hasObfuscatedFont: false,
+                  svgJobId: '',
                   extractedQuestions: [],
                   images: []
                 });

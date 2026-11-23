@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.scluzlep.searchcx.data.CollapsedBallStyle
+import com.scluzlep.searchcx.data.DomContextSource
 import com.scluzlep.searchcx.data.ProviderProfile
 import com.scluzlep.searchcx.ui.MarkdownMessageView
 
@@ -100,10 +102,11 @@ object OverlayPromptBuilder {
 
     private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[图片\d*\]""")
 
-    fun quoteBadgeForStatus(domStatus: String): String = when (domStatus) {
+    fun quoteBadgeForStatus(domStatus: String): String = when (domStatus.trim()) {
         "已粘贴" -> CONTEXT_BADGE_CLIPBOARD
         "已抓取 · 题目" -> CONTEXT_BADGE_QUESTIONS
         "已抓取 · 选区" -> CONTEXT_BADGE_SELECTION
+        "已抓取 · 正文" -> CONTEXT_BADGE_DOM
         else -> CONTEXT_BADGE_DOM
     }
 
@@ -194,6 +197,21 @@ object OverlayPromptBuilder {
     }
 }
 
+data class DomImagePreviewItem(
+    val index: Int,
+    val bitmap: Bitmap?,
+    val isFormula: Boolean,
+    val label: String,
+    val included: Boolean = true
+)
+
+data class DomQuestionChipItem(
+    val index: Int,
+    val label: String,
+    val preview: String,
+    val selected: Boolean
+)
+
 data class OverlayUiState(
     val profiles: List<ProviderProfile> = emptyList(),
     val activeProfileId: String = "",
@@ -215,7 +233,13 @@ data class OverlayUiState(
     val ballIdleRetracted: Boolean = false,
     val ballDockRight: Boolean = true,
     val ballHasUnreadReply: Boolean = false,
-    val collapsedBallStyle: CollapsedBallStyle = CollapsedBallStyle.BUTTON
+    val collapsedBallStyle: CollapsedBallStyle = CollapsedBallStyle.BUTTON,
+    val isContextPreviewExpanded: Boolean = false,
+    val activeContextSource: DomContextSource? = null,
+    val availableContextSources: List<DomContextSource> = emptyList(),
+    val questionChips: List<DomQuestionChipItem> = emptyList(),
+    val domImagePreviews: List<DomImagePreviewItem> = emptyList(),
+    val hasObfuscatedFont: Boolean = false
 )
 
 private val ACCENT_BLUE = Color(0xFF3482FF)
@@ -358,7 +382,12 @@ fun FloatingPanelComposable(
     onClearChat: () -> Unit,
     onCopyMessage: (String) -> Unit,
     onRegenerateLast: () -> Unit,
-    onRequestImeFocus: (FocusRequester) -> Unit
+    onRequestImeFocus: (FocusRequester) -> Unit,
+    onToggleContextPreview: () -> Unit = {},
+    onSelectContextSource: (DomContextSource) -> Unit = {},
+    onToggleQuestionIndex: (Int) -> Unit = {},
+    onSelectAllQuestions: () -> Unit = {},
+    onToggleDomImageIncluded: (Int) -> Unit = {}
 ) {
     var showProfileMenu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -568,22 +597,66 @@ fun FloatingPanelComposable(
                         barWidth = 3.dp,
                         textColor = ACCENT_BLUE,
                         verticalPadding = 4.dp,
-                        trailing = { CompactRemoveButton(onClick = onClearContext) }
+                        onClick = onToggleContextPreview,
+                        trailing = {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CompactActionPill(
+                                    label = if (state.isContextPreviewExpanded) "收起" else "预览",
+                                    textColor = ACCENT_BLUE,
+                                    onClick = onToggleContextPreview
+                                )
+                                CompactRemoveButton(onClick = onClearContext)
+                            }
+                        }
                     )
+
+                    AnimatedVisibility(visible = state.isContextPreviewExpanded) {
+                        ContextPreviewCard(
+                            state = state,
+                            onSelectContextSource = onSelectContextSource,
+                            onToggleQuestionIndex = onToggleQuestionIndex,
+                            onSelectAllQuestions = onSelectAllQuestions,
+                            onToggleDomImageIncluded = onToggleDomImageIncluded
+                        )
+                    }
                 }
 
                 if (state.warningText.isNotBlank()) {
-                    Box(
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFFFEF3C7))
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         BasicText(
                             text = state.warningText,
-                            style = TextStyle(color = Color(0xFF92400E), fontSize = 11.sp, lineHeight = 16.sp)
+                            style = TextStyle(color = Color(0xFF92400E), fontSize = 11.sp, lineHeight = 16.sp),
+                            modifier = Modifier.weight(1f)
                         )
+                        if (state.hasObfuscatedFont) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFFD97706))
+                                    .clickable(onClick = onCaptureScreen)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                BasicText(
+                                    text = "截屏框选",
+                                    style = TextStyle(
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -842,6 +915,7 @@ private fun QuoteReferenceBlock(
     barWidth: Dp,
     textColor: Color,
     verticalPadding: Dp,
+    onClick: (() -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null
 ) {
     Row(
@@ -856,7 +930,8 @@ private fun QuoteReferenceBlock(
         Row(
             modifier = Modifier
                 .weight(1f)
-                .height(IntrinsicSize.Min),
+                .height(IntrinsicSize.Min)
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
@@ -885,7 +960,222 @@ private fun QuoteReferenceBlock(
 }
 
 @Composable
-private fun CompactRemoveButton(onClick: () -> Unit) {
+private fun ContextPreviewCard(
+    state: OverlayUiState,
+    onSelectContextSource: (DomContextSource) -> Unit,
+    onToggleQuestionIndex: (Int) -> Unit,
+    onSelectAllQuestions: () -> Unit,
+    onToggleDomImageIncluded: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(SURFACE_GRAY)
+            .border(1.dp, BORDER_SUBTLE, RoundedCornerShape(10.dp))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        if (state.availableContextSources.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                state.availableContextSources.forEach { source ->
+                    val label = when (source) {
+                        DomContextSource.SELECTION -> "选区"
+                        DomContextSource.QUESTIONS -> "按题"
+                        DomContextSource.FULL_DOM -> "完整DOM"
+                    }
+                    PreviewFilterChip(
+                        label = label,
+                        selected = source == state.activeContextSource,
+                        onClick = { onSelectContextSource(source) }
+                    )
+                }
+            }
+        }
+
+        if (state.questionChips.size >= 2) {
+            val allSelected = state.questionChips.all { it.selected }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PreviewFilterChip(
+                    label = "全部",
+                    selected = allSelected,
+                    onClick = onSelectAllQuestions
+                )
+                state.questionChips.forEach { chip ->
+                    PreviewFilterChip(
+                        label = chip.label.ifBlank { "第${chip.index + 1}题" },
+                        selected = chip.selected,
+                        onClick = { onToggleQuestionIndex(chip.index) }
+                    )
+                }
+            }
+        }
+
+        if (state.domImagePreviews.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                state.domImagePreviews.forEach { item ->
+                    DomImageThumbnailCard(
+                        item = item,
+                        onClick = { onToggleDomImageIncluded(item.index) }
+                    )
+                }
+            }
+        }
+
+        BasicText(
+            text = state.contextText.trim(),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            style = TextStyle(
+                color = TEXT_SECONDARY,
+                fontSize = 11.sp,
+                lineHeight = 15.sp
+            )
+        )
+    }
+}
+
+@Composable
+private fun PreviewFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) ACCENT_BLUE else Color.White)
+            .border(
+                width = 1.dp,
+                color = if (selected) ACCENT_BLUE else BORDER_SUBTLE,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        BasicText(
+            text = label,
+            style = TextStyle(
+                color = if (selected) Color.White else TEXT_PRIMARY,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium
+            )
+        )
+    }
+}
+
+@Composable
+private fun DomImageThumbnailCard(
+    item: DomImagePreviewItem,
+    onClick: () -> Unit
+) {
+    val badgeText = item.label.ifBlank {
+        if (item.isFormula) "公式${item.index}" else "图${item.index}"
+    }
+    Column(
+        modifier = Modifier
+            .width(56.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.White)
+            .border(
+                width = if (item.included) 1.5.dp else 1.dp,
+                color = if (item.included) ACCENT_BLUE else BORDER_SUBTLE,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 56.dp, height = 44.dp)
+                .background(Color.White),
+            contentAlignment = Alignment.Center
+        ) {
+            val bmp = item.bitmap
+            if (bmp != null && !bmp.isRecycled) {
+                val imgBitmap = remember(bmp) { bmp.asImageBitmap() }
+                Image(
+                    bitmap = imgBitmap,
+                    contentDescription = badgeText,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(3.dp)
+                        .alpha(if (item.included) 1f else 0.35f)
+                )
+            } else {
+                BasicText(
+                    text = if (item.isFormula) "公式" else "图片",
+                    style = TextStyle(
+                        color = TEXT_SECONDARY,
+                        fontSize = 10.sp
+                    ),
+                    modifier = Modifier.alpha(if (item.included) 1f else 0.45f)
+                )
+            }
+            if (!item.included) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xB3111827))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    BasicText(
+                        text = "已排除",
+                        style = TextStyle(
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(if (item.included) ACCENT_SOFT else Color(0xFFE5E7EB))
+                .padding(horizontal = 3.dp, vertical = 2.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            BasicText(
+                text = badgeText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(
+                    color = if (item.included) ACCENT_BLUE else TEXT_SECONDARY,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactActionPill(
+    label: String,
+    textColor: Color,
+    onClick: () -> Unit
+) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -894,10 +1184,19 @@ private fun CompactRemoveButton(onClick: () -> Unit) {
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         BasicText(
-            text = "移除",
-            style = TextStyle(color = Color(0xFFDC2626), fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            text = label,
+            style = TextStyle(color = textColor, fontSize = 11.sp, fontWeight = FontWeight.Medium)
         )
     }
+}
+
+@Composable
+private fun CompactRemoveButton(onClick: () -> Unit) {
+    CompactActionPill(
+        label = "移除",
+        textColor = Color(0xFFDC2626),
+        onClick = onClick
+    )
 }
 
 @Composable

@@ -9,7 +9,9 @@ import com.scluzlep.searchcx.tiku.TikuMode
 import com.scluzlep.searchcx.tiku.TikuProvider
 import com.scluzlep.searchcx.tiku.TikuProviderTokens
 import com.scluzlep.searchcx.tiku.TikuQuestionType
+import com.scluzlep.searchcx.tiku.TikuSearchCache
 import com.scluzlep.searchcx.tiku.TikuSearchRequest
+import com.scluzlep.searchcx.tiku.TikuSearchResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -27,9 +29,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -570,6 +575,326 @@ class TikuCoreTest {
         assertTrue(res.isHit())
         assertEquals("B", res.answerKeyText)
         assertEquals(listOf("北京"), res.bestAnswer)
+    }
+
+    @Test
+    fun flattenLatexForTikuNormalizesFormulasPreservesPlainTextAndStripsImages() {
+        assertEquals("1/2", OcsQuestionExtractor.flattenLatexForTiku("\$\\frac{1}{2}\$"))
+        assertEquals("(a+b)/c", OcsQuestionExtractor.flattenLatexForTiku("""\dfrac{a+b}{c}"""))
+        assertEquals("1/(x+1)", OcsQuestionExtractor.flattenLatexForTiku("""\tfrac{1}{x+1}"""))
+        assertEquals("(a+b)/(c+d)", OcsQuestionExtractor.flattenLatexForTiku("\$\$\\frac{a+b}{c+d}\$\$"))
+        assertEquals("1/(1+1/x)", OcsQuestionExtractor.flattenLatexForTiku("""\frac{1}{1+\frac{1}{x}}"""))
+        assertEquals("(1/2)/(3/4)", OcsQuestionExtractor.flattenLatexForTiku("""\frac{\frac{1}{2}}{\frac{3}{4}}"""))
+
+        assertEquals("√x", OcsQuestionExtractor.flattenLatexForTiku("""\sqrt{x}"""))
+        assertEquals("√(x+1)", OcsQuestionExtractor.flattenLatexForTiku("""\sqrt{x+1}"""))
+        assertEquals("√(a/b)", OcsQuestionExtractor.flattenLatexForTiku("""\sqrt{\frac{a}{b}}"""))
+        assertEquals("3次根号8", OcsQuestionExtractor.flattenLatexForTiku("""\sqrt[3]{8}"""))
+        assertEquals("n次根号(x+1)", OcsQuestionExtractor.flattenLatexForTiku("""\sqrt[n]{x+1}"""))
+
+        assertEquals(
+            "x^2 + a_n + x^(a+b) + a_(i,j)",
+            OcsQuestionExtractor.flattenLatexForTiku("""x^{2} + a_{n} + x^{a+b} + a_{i,j}""")
+        )
+        assertEquals("e^(-x^2)", OcsQuestionExtractor.flattenLatexForTiku("""e^{-x^{2}}"""))
+        assertEquals(
+            "sin 30° + cos 60° + 45°",
+            OcsQuestionExtractor.flattenLatexForTiku("""\sin 30^{\circ} + \cos 60^\circ + 45\degree""")
+        )
+
+        assertEquals(
+            "(x/2)^2 + 常量 + dx + lim_(x → 0) x",
+            OcsQuestionExtractor.flattenLatexForTiku(
+                """\(\displaystyle \left(\frac{x}{2}\right)^{2} + \text{常量} + \mathrm{d}x + \operatorname{lim}_{x \to 0} x\)"""
+            )
+        )
+
+        assertEquals(
+            "a × b ÷ c ± d ∓ e · f ≤ g ≥ h ≠ 0 ≈ 1 ≡ 2 → ∞",
+            OcsQuestionExtractor.flattenLatexForTiku(
+                """\[a \times b \div c \pm d \mp e \cdot f \le g \ge h \ne 0 \approx 1 \equiv 2 \to \infty\]"""
+            )
+        )
+        assertEquals(
+            "∀ x ∈ A, ∃ y ∉ B ⇒ A ∪ B ∩ C ⊂ D ⊆ E",
+            OcsQuestionExtractor.flattenLatexForTiku(
+                """\forall x \in A, \exists y \notin B \Rightarrow A \cup B \cap C \subset D \subseteq E"""
+            )
+        )
+        assertEquals(
+            "∑ ∏ ∫ ∂ ∇ ∵ ∴ ∠ △ ⊥ ∥ ← ⇔",
+            OcsQuestionExtractor.flattenLatexForTiku(
+                """\sum \prod \int \partial \nabla \because \therefore \angle \triangle \perp \parallel \leftarrow \Leftrightarrow"""
+            )
+        )
+        assertEquals(
+            "α β γ θ λ π σ ω Γ Δ Θ Λ Π Σ Φ Ψ Ω",
+            OcsQuestionExtractor.flattenLatexForTiku(
+                """\alpha \beta \gamma \theta \lambda \pi \sigma \omega \Gamma \Delta \Theta \Lambda \Pi \Sigma \Phi \Psi \Omega"""
+            )
+        )
+
+        assertEquals(
+            "求 x^2 的最大值",
+            OcsQuestionExtractor.flattenLatexForTiku("[图片1] 求 \$x^{2}\$ 的最大值 [图片]")
+        )
+        assertEquals("90%", OcsQuestionExtractor.flattenLatexForTiku("\$90\\%\$"))
+
+        assertEquals("中国的首都是哪里？", OcsQuestionExtractor.flattenLatexForTiku("中国的首都是哪里？"))
+        assertEquals(
+            "原价 \$100，运费 \$10 + \$20 = \$30",
+            OcsQuestionExtractor.flattenLatexForTiku("原价 \$100，运费 \$10 + \$20 = \$30")
+        )
+        assertEquals(
+            """if (a < b && c > d) { user_name = "a\nb"; }""",
+            OcsQuestionExtractor.flattenLatexForTiku("""if (a < b && c > d) { user_name = "a\nb"; }""")
+        )
+
+        val rawLatexQuiz = listOf(
+            "1. 【单选题】计算 &lt;b&gt; \$\\frac{1}{2} + \\frac{1}{3}\$ [图片1]（5分）",
+            "A. \$\\frac{5}{6}\$",
+            "B. \$\\frac{1}{6}\$"
+        ).joinToString("\n")
+        val parsed = OcsQuestionExtractor.extract(rawLatexQuiz)
+        assertEquals(1, parsed.size)
+        assertEquals("计算 <b> 1/2 + 1/3", parsed[0].question)
+        assertEquals(listOf("5/6", "1/6"), parsed[0].options)
+    }
+
+    @Test
+    fun tikuSearchCacheEnforcesHitsOnlyTtlLruKeyIsolationAndPersistence() {
+        val tempDir = Files.createTempDirectory("tiku_cache_test").toFile()
+        try {
+            var clock = 1_000L
+            val cacheFile = File(tempDir, "tiku_cache.json")
+            val cache = TikuSearchCache(
+                persistenceFile = cacheFile,
+                ttlMs = 5_000L,
+                maxEntries = 2,
+                nowMs = { clock }
+            )
+
+            // Misses must NOT be cached.
+            val miss = TikuSearchResult(
+                question = "未命中题目",
+                options = emptyList(),
+                type = TikuQuestionType.QA.code,
+                bestAnswer = emptyList(),
+                answerKey = emptyList(),
+                answerKeyText = "",
+                answerText = "",
+                answerIndex = emptyList(),
+                allAnswers = emptyList(),
+                matchedProviders = emptyList(),
+                error = "未找到"
+            )
+            cache.put("miss_key", miss)
+            assertNull(cache.get("miss_key"))
+            assertEquals(0, cache.size())
+
+            // Hits are cached and LRU evicts the least-recently-used key when exceeding maxEntries.
+            val hit1 = sampleHitResult("题目1", "答案1")
+            val hit2 = sampleHitResult("题目2", "答案2")
+            val hit3 = sampleHitResult("题目3", "答案3")
+
+            cache.put("k1", hit1)
+            clock += 100L
+            cache.put("k2", hit2)
+            assertEquals(2, cache.size())
+
+            // Touch k1 so k2 becomes the eldest/LRU entry.
+            clock += 100L
+            assertEquals(hit1, cache.get("k1"))
+
+            clock += 100L
+            cache.put("k3", hit3)
+            assertEquals(2, cache.size())
+            assertNull(cache.get("k2"))
+            assertEquals(hit1, cache.get("k1"))
+            assertEquals(hit3, cache.get("k3"))
+
+            // JSON persistence round-trip across separate TikuSearchCache instances.
+            val reloaded = TikuSearchCache(
+                persistenceFile = cacheFile,
+                ttlMs = 5_000L,
+                maxEntries = 2,
+                nowMs = { clock }
+            )
+            assertEquals(2, reloaded.size())
+            assertEquals(hit1, reloaded.get("k1"))
+            assertEquals(hit3, reloaded.get("k3"))
+            assertNull(reloaded.get("k2"))
+
+            // TTL expiry check: k1 was stored at 1_000L, k3 at 1_300L.
+            clock = 5_999L
+            assertEquals(hit1, reloaded.get("k1"))
+            clock = 6_000L
+            assertNull(reloaded.get("k1"))
+            assertEquals(hit3, reloaded.get("k3"))
+            clock = 6_300L
+            assertNull(reloaded.get("k3"))
+            assertEquals(0, reloaded.size())
+
+            // Corrupt cache files are safely ignored, and clear() clears persisted data.
+            val corruptFile = File(tempDir, "corrupt_cache.json")
+            corruptFile.writeText("{corrupt json", Charsets.UTF_8)
+            val recovered = TikuSearchCache(persistenceFile = corruptFile, nowMs = { clock })
+            assertEquals(0, recovered.size())
+            assertNull(recovered.get("k1"))
+            recovered.put("k_ok", hit1)
+            assertEquals(hit1, recovered.get("k_ok"))
+            recovered.clear()
+            assertEquals(0, recovered.size())
+            assertEquals(0, TikuSearchCache(persistenceFile = corruptFile, nowMs = { clock }).size())
+
+            // Key isolation across modes, remote URLs, providers, types, options, and LaTeX equivalence.
+            val directCfg = TikuConfig(
+                mode = TikuMode.DIRECT_BUILTIN,
+                remoteBaseUrl = "http://host-a:8060",
+                enabledProviders = setOf("icodef", "buguake")
+            )
+            val directOtherRemoteCfg = directCfg.copy(remoteBaseUrl = "http://host-b:8060")
+            val remoteHostACfg = directCfg.copy(mode = TikuMode.REMOTE_ADAPTER)
+            val remoteHostACanonicalCfg = directCfg.copy(
+                mode = TikuMode.REMOTE_ADAPTER,
+                remoteBaseUrl = "http://host-a:8060/adapter-service/search"
+            )
+            val remoteHostBCfg = directOtherRemoteCfg.copy(mode = TikuMode.REMOTE_ADAPTER)
+            val directExtraProviderCfg = directCfg.withProviderToggled("tikuhai", true)
+            val directEnncyNoTokenCfg = directCfg.withProviderToggled("enncy", true)
+            val directEnncyWithTokenCfg = directEnncyNoTokenCfg.copy(
+                tokens = TikuProviderTokens(enncyToken = "tok_123")
+            )
+
+            val latexReqA = TikuSearchRequest(
+                question = "1. 计算 \$\\frac{1}{2}\$",
+                options = listOf("A. 0.5", "B. 1"),
+                type = TikuQuestionType.SINGLE.code
+            )
+            val latexReqB = TikuSearchRequest(
+                question = "2. 计算 1/2",
+                options = listOf("0.5", "1"),
+                type = TikuQuestionType.SINGLE.code
+            )
+            val diffTypeReq = latexReqB.copy(type = TikuQuestionType.MULTIPLE.code)
+            val diffOptsReq = latexReqB.copy(options = listOf("0.5", "2"))
+
+            assertEquals(
+                TikuSearchCache.buildKey(latexReqA, directCfg),
+                TikuSearchCache.buildKey(latexReqB, directCfg)
+            )
+            assertEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(latexReqB, directOtherRemoteCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(latexReqB, remoteHostACfg)
+            )
+            assertEquals(
+                TikuSearchCache.buildKey(latexReqB, remoteHostACfg),
+                TikuSearchCache.buildKey(latexReqB, remoteHostACanonicalCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, remoteHostACfg),
+                TikuSearchCache.buildKey(latexReqB, remoteHostBCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(latexReqB, directExtraProviderCfg)
+            )
+            assertEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(latexReqB, directEnncyNoTokenCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, directEnncyNoTokenCfg),
+                TikuSearchCache.buildKey(latexReqB, directEnncyWithTokenCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(diffTypeReq, directCfg)
+            )
+            assertNotEquals(
+                TikuSearchCache.buildKey(latexReqB, directCfg),
+                TikuSearchCache.buildKey(diffOptsReq, directCfg)
+            )
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun tikuAdapterClientCachesHitsOnlyAndSkipsCacheOnTestConnection() = runBlocking {
+        val httpCalls = AtomicInteger(0)
+        val mockClient = mockOkHttp { req ->
+            httpCalls.incrementAndGet()
+            val body = readBodyString(req)
+            when {
+                body.contains("question=1%2F2") || body.contains("1/2") ->
+                    jsonResponse(req, """{"code":1,"data":"0.5"}""")
+                body.contains("%E9%A6%96%E9%83%BD") ->
+                    jsonResponse(req, """{"code":1,"data":"北京"}""")
+                else ->
+                    jsonResponse(req, """{"code":0,"data":null}""")
+            }
+        }
+
+        val cache = TikuSearchCache()
+        val client = TikuAdapterClient(httpClient = mockClient, cache = cache)
+        val cfg = TikuConfig(
+            mode = TikuMode.DIRECT_BUILTIN,
+            enabledProviders = setOf("icodef")
+        )
+
+        val firstHit = client.searchOne(
+            TikuSearchRequest("1. \$\\frac{1}{2}\$", listOf("A. 0.5", "B. 1"), TikuQuestionType.SINGLE.code),
+            cfg
+        )
+        assertTrue(firstHit.isHit())
+        assertEquals(listOf("0.5"), firstHit.bestAnswer)
+        assertEquals(1, httpCalls.get())
+        assertEquals(1, cache.size())
+
+        // Identical canonical query hits cache without making an HTTP call.
+        val cachedHit = client.searchOne(
+            TikuSearchRequest("2. \\frac{1}{2}", listOf("0.5", "1"), TikuQuestionType.SINGLE.code),
+            cfg
+        )
+        assertEquals(firstHit, cachedHit)
+        assertEquals(1, httpCalls.get())
+
+        // Misses are NOT cached, so repeating the missed query hits HTTP again.
+        val missReq = TikuSearchRequest("冷门未命中题目", type = TikuQuestionType.QA.code)
+        val firstMiss = client.searchOne(missReq, cfg)
+        assertFalse(firstMiss.isHit())
+        assertEquals(2, httpCalls.get())
+        val secondMiss = client.searchOne(missReq, cfg)
+        assertFalse(secondMiss.isHit())
+        assertEquals(3, httpCalls.get())
+        assertEquals(1, cache.size())
+
+        // testConnection must never read from or write to the search cache.
+        assertTrue(client.testConnection(cfg).isSuccess)
+        assertEquals(4, httpCalls.get())
+        assertTrue(client.testConnection(cfg).isSuccess)
+        assertEquals(5, httpCalls.get())
+    }
+
+    private fun sampleHitResult(question: String, answer: String): TikuSearchResult {
+        return TikuSearchResult(
+            question = question,
+            options = listOf("选项甲", "选项乙"),
+            type = TikuQuestionType.SINGLE.code,
+            bestAnswer = listOf(answer),
+            answerKey = listOf("A"),
+            answerKeyText = "A",
+            answerText = answer,
+            answerIndex = listOf(0),
+            allAnswers = listOf(listOf(answer)),
+            matchedProviders = listOf("icodef"),
+            error = null
+        )
     }
 
     private data class CapturedHttp(val request: Request, val body: String)

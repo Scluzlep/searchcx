@@ -120,6 +120,47 @@ class ThinkTagSplitter {
 
 object OpenAiSseParser {
 
+    const val DEFAULT_RECENT_IMAGE_TURNS = 2
+    private const val PRUNED_IMAGES_MARKER = "[早期轮次附图已省略]"
+
+    /**
+     * Strips images from older image-bearing turns beyond the most recent [maxImageTurnsToKeep]
+     * while leaving non-image turns untouched and avoiding duplicate omission markers.
+     */
+    fun pruneHistoryImages(
+        history: List<ChatTurn>,
+        maxImageTurnsToKeep: Int = DEFAULT_RECENT_IMAGE_TURNS
+    ): List<ChatTurn> {
+        val imageTurnIndices = history.indices.filter { history[it].allImages().isNotEmpty() }
+        if (imageTurnIndices.isEmpty()) return history
+
+        val keepCount = maxImageTurnsToKeep.coerceAtLeast(0)
+        if (imageTurnIndices.size <= keepCount) return history
+
+        val keepIndices = if (keepCount == 0) {
+            emptySet()
+        } else {
+            imageTurnIndices.takeLast(keepCount).toHashSet()
+        }
+
+        return history.mapIndexed { idx, turn ->
+            if (idx in keepIndices || turn.allImages().isEmpty()) {
+                turn
+            } else {
+                val prunedContent = when {
+                    turn.content.contains(PRUNED_IMAGES_MARKER) -> turn.content
+                    turn.content.isBlank() -> PRUNED_IMAGES_MARKER
+                    else -> "${turn.content}\n$PRUNED_IMAGES_MARKER"
+                }
+                turn.copy(
+                    content = prunedContent,
+                    imageBase64Jpeg = null,
+                    images = emptyList()
+                )
+            }
+        }
+    }
+
     fun parseLine(line: String): SseEvent? {
         val events = parseChatCompletionsLine(line, thinkSplitter = null)
         for (ev in events) {
@@ -280,7 +321,8 @@ object OpenAiSseParser {
         if (systemPrompt.isNotBlank()) {
             messages.put(JSONObject().put("role", "system").put("content", systemPrompt.trim()))
         }
-        for (turn in history) {
+        val prunedHistory = pruneHistoryImages(history)
+        for (turn in prunedHistory) {
             val turnImages = turn.allImages()
             if (turnImages.isNotEmpty()) {
                 val parts = JSONArray().apply {
@@ -326,7 +368,8 @@ object OpenAiSseParser {
                     .put("content", systemPrompt.trim())
             )
         }
-        for (turn in history) {
+        val prunedHistory = pruneHistoryImages(history)
+        for (turn in prunedHistory) {
             val turnImages = turn.allImages()
             if (turnImages.isNotEmpty()) {
                 val parts = JSONArray().apply {
@@ -372,7 +415,8 @@ object OpenAiSseParser {
         if (root.has("error") && !root.isNull("error")) {
             val errObj = root.optJSONObject("error")
             val msg = errObj?.optString("message")?.takeIf { it.isNotBlank() }
-                ?: root.opt("error").toString()
+                ?: root.opt("error")?.toString()
+                ?: "unknown"
             throw IllegalStateException("Upstream API error: $msg")
         }
     }

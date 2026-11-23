@@ -41,6 +41,8 @@ import com.scluzlep.searchcx.data.AppConfigStore
 import com.scluzlep.searchcx.data.CollapsedBallStyle
 import com.scluzlep.searchcx.data.DomContextSource
 import com.scluzlep.searchcx.data.DomImageItem
+import com.scluzlep.searchcx.data.DomQuizItem
+import com.scluzlep.searchcx.data.DomSnapshot
 import com.scluzlep.searchcx.ipc.DomIpcContract
 import com.scluzlep.searchcx.ipc.DomSnapshotBus
 import com.scluzlep.searchcx.ipc.DomSnapshotReceiver
@@ -52,6 +54,7 @@ import com.scluzlep.searchcx.net.StreamEvent
 import com.scluzlep.searchcx.tiku.OcsQuestionExtractor
 import com.scluzlep.searchcx.tiku.TikuAdapterClient
 import com.scluzlep.searchcx.tiku.TikuMarkdownFormatter
+import com.scluzlep.searchcx.tiku.TikuSearchCache
 import com.scluzlep.searchcx.tiku.TikuSearchRequest
 import com.scluzlep.searchcx.tiku.TikuSearchResult
 import com.scluzlep.searchcx.ui.MainActivity
@@ -65,8 +68,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import java.util.UUID
 import kotlin.math.abs
 
@@ -78,13 +83,22 @@ class OverlayService : Service() {
     private lateinit var configStore: AppConfigStore
     private lateinit var screenCapture: ScreenCaptureHelper
     private val openAiClient = OpenAiClient()
-    private val tikuClient = TikuAdapterClient()
+    private val tikuClient by lazy {
+        TikuAdapterClient(cache = TikuSearchCache(File(cacheDir, "tiku_cache_v1.json")))
+    }
     private val domImageFetcher = DomImageFetcher()
     private val domReceiver = DomSnapshotReceiver()
 
     private var uiState by mutableStateOf(OverlayUiState())
     private val conversationHistory = mutableListOf<ChatTurn>()
     private var nextMsgId = 1L
+    private var activeDomSnapshot: DomSnapshot? = null
+    private var selectedContextSourceOverride: DomContextSource? = null
+    private var selectedQuestionIndices: Set<Int>? = null
+    private val excludedImageIndices = linkedSetOf<Int>()
+    private val thumbnailCache = linkedMapOf<Int, Bitmap?>()
+    private var thumbnailLoadJob: Job? = null
+    private var activeDomCaptureJob: Job? = null
     private var contextExtractedQuestions: List<TikuSearchRequest> = emptyList()
     private var contextDomImages: List<DomImageItem> = emptyList()
     private var contextPageUrl: String = ""
@@ -207,12 +221,16 @@ class OverlayService : Service() {
         isRunning = false
         idleRetractJob?.cancel()
         activeChatJob?.cancel()
+        activeDomCaptureJob?.cancel()
+        thumbnailLoadJob?.cancel()
+        thumbnailLoadJob = null
         scope.cancel()
         runCatching { unregisterReceiver(domReceiver) }
         screenCapture.release()
         dismissCropOverlay()
         removeWindowSafely(ballView, ballOwner)
         removeWindowSafely(panelView, panelOwner)
+        clearDomSessionState(resetUiState = true)
         super.onDestroy()
     }
 
@@ -421,7 +439,12 @@ class OverlayService : Service() {
                         onClearChat = { clearAllChat() },
                         onCopyMessage = { text -> copyToClipboard(text) },
                         onRegenerateLast = { regenerateLastTurn() },
-                        onRequestImeFocus = { targetRequester -> enablePanelImeFocus(targetRequester) }
+                        onRequestImeFocus = { targetRequester -> enablePanelImeFocus(targetRequester) },
+                        onToggleContextPreview = { toggleContextPreview() },
+                        onSelectContextSource = { source -> selectContextSource(source) },
+                        onToggleQuestionIndex = { idx -> toggleQuestionIndex(idx) },
+                        onSelectAllQuestions = { selectAllQuestions() },
+                        onToggleDomImageIncluded = { idx -> toggleDomImageIncluded(idx) }
                     )
                 }
             }
@@ -615,18 +638,20 @@ class OverlayService : Service() {
 
     private fun captureForegroundDom(autoAskAfter: Boolean) {
         disablePanelImeFocus(hideIme = true)
+        activeDomCaptureJob?.cancel()
         uiState = uiState.copy(domStatus = "抓取 DOM 中...", warningText = "")
         val requestId = UUID.randomUUID().toString()
 
-        scope.launch {
+        activeDomCaptureJob = scope.launch {
             val intent = Intent(DomIpcContract.ACTION_CAPTURE_DOM).apply {
                 putExtra(DomIpcContract.EXTRA_REQUEST_ID, requestId)
             }
             sendBroadcast(intent)
 
-            val event = withTimeoutOrNull(4_000L) {
+            val event = withTimeoutOrNull(7_000L) {
                 DomSnapshotBus.events.filter { it.requestId == requestId }.first()
             }
+            ensureActive()
 
             if (event == null) {
                 uiState = uiState.copy(
@@ -646,61 +671,218 @@ class OverlayService : Service() {
                 return@launch
             }
 
-            val source = snap.activeContextSource()
-            val modeLabel = source.displayLabel
-            val titlePart = snap.title.ifBlank { snap.url }.ifBlank { "无标题" }
-            runCatching { snap.effectiveContextText() }
-                .onSuccess { text ->
-                    val preferredQuestions = if (source == DomContextSource.QUESTIONS) {
-                        snap.preferredQuestions()
-                    } else {
-                        emptyList()
-                    }
-                    val activeImages = snap.activeImages()
-                    contextExtractedQuestions = preferredQuestions.mapNotNull { item ->
-                        val cleanStem = OverlayPromptBuilder.sanitizeForTikuSearch(item.question)
-                        val cleanOpts = item.options
-                            .map { OverlayPromptBuilder.sanitizeForTikuSearch(it) }
-                            .filter { it.isNotEmpty() }
-                        if (cleanStem.length < 3 && cleanOpts.isEmpty()) {
-                            null
-                        } else {
-                            TikuSearchRequest(
-                                question = cleanStem,
-                                options = cleanOpts,
-                                type = item.type
-                            )
-                        }
-                    }
-                    contextDomImages = activeImages
-                    contextPageUrl = snap.url
+            val oldThumbs = resetDomSessionVariables()
+            activeDomSnapshot = snap
+            uiState = uiState.copy(isContextPreviewExpanded = false)
+            val projected = refreshActiveDomProjection(loadThumbnails = true)
+            recycleUnreferencedBitmaps(oldThumbs)
 
-                    uiState = uiState.copy(
-                        domStatus = "已抓取 · $modeLabel",
-                        contextMeta = "已附带网页 · $modeLabel · ${preferredQuestions.size} 题 · ${activeImages.size} 图 · ${text.length} 字 · $titlePart",
-                        contextText = text,
-                        domQuestionCount = preferredQuestions.size,
-                        domImageCount = activeImages.size,
-                        warningText = snap.warningMessage().orEmpty()
+            if (projected && autoAskAfter) {
+                val prompt = configStore.load().overlayPrefs.quickAskPrompt
+                sendQuickAction(
+                    displayLabel = OverlayPromptBuilder.DEFAULT_EMPTY_DOM_LABEL,
+                    instruction = prompt,
+                    allowTikuPresearch = true
+                )
+            }
+        }
+    }
+
+    private fun toggleContextPreview() {
+        if (uiState.contextText.isBlank()) return
+        uiState = uiState.copy(isContextPreviewExpanded = !uiState.isContextPreviewExpanded)
+    }
+
+    private fun selectContextSource(source: DomContextSource) {
+        val snap = activeDomSnapshot ?: return
+        if (source !in snap.availableContextSources()) return
+        selectedContextSourceOverride = source
+        refreshActiveDomProjection(loadThumbnails = true)
+    }
+
+    private fun toggleQuestionIndex(index: Int) {
+        val snap = activeDomSnapshot ?: return
+        val allValidQuestions = snap.extractedQuestions.filter { it.question.isNotBlank() }
+        if (index !in allValidQuestions.indices) return
+        val current = currentActiveQuestionIndices(allValidQuestions)
+        val next = if (index in current) current - index else current + index
+        if (next.isEmpty()) {
+            uiState = uiState.copy(warningText = "至少保留一道题目")
+            return
+        }
+        selectedQuestionIndices = next
+        if (selectedContextSourceOverride != DomContextSource.QUESTIONS) {
+            selectedContextSourceOverride = DomContextSource.QUESTIONS
+        }
+        refreshActiveDomProjection(loadThumbnails = true)
+    }
+
+    private fun selectAllQuestions() {
+        val snap = activeDomSnapshot ?: return
+        val allValidQuestions = snap.extractedQuestions.filter { it.question.isNotBlank() }
+        if (allValidQuestions.isEmpty()) return
+        val preferred = preferredQuestionIndices(allValidQuestions)
+        selectedQuestionIndices = if (preferred.size == allValidQuestions.size) {
+            null
+        } else {
+            allValidQuestions.indices.toSet()
+        }
+        refreshActiveDomProjection(loadThumbnails = true)
+    }
+
+    private fun toggleDomImageIncluded(imageIndex: Int) {
+        if (activeDomSnapshot == null) return
+        if (imageIndex in excludedImageIndices) {
+            excludedImageIndices.remove(imageIndex)
+        } else {
+            excludedImageIndices.add(imageIndex)
+        }
+        refreshActiveDomProjection(loadThumbnails = false)
+    }
+
+    private fun preferredQuestionIndices(allValidQuestions: List<DomQuizItem>): Set<Int> {
+        val visible = allValidQuestions.mapIndexedNotNull { idx, item ->
+            if (item.inViewport) idx else null
+        }.toSet()
+        return if (visible.isNotEmpty()) visible else allValidQuestions.indices.toSet()
+    }
+
+    private fun currentActiveQuestionIndices(allValidQuestions: List<DomQuizItem>): Set<Int> {
+        val validRange = allValidQuestions.indices.toSet()
+        val chosen = selectedQuestionIndices?.intersect(validRange)?.takeIf { it.isNotEmpty() }
+        return chosen ?: preferredQuestionIndices(allValidQuestions)
+    }
+
+    private fun refreshActiveDomProjection(loadThumbnails: Boolean): Boolean {
+        val snap = activeDomSnapshot ?: return false
+        val availableSources = snap.availableContextSources()
+        val defaultSource = snap.activeContextSource()
+        val requestedOverride = selectedContextSourceOverride
+        val effectiveSource = if (requestedOverride != null && requestedOverride in availableSources) {
+            requestedOverride
+        } else {
+            if (requestedOverride != null) {
+                selectedContextSourceOverride = null
+            }
+            defaultSource
+        }
+
+        val textResult = runCatching {
+            snap.effectiveContextText(effectiveSource, selectedQuestionIndices)
+        }
+        if (textResult.isFailure) {
+            val err = textResult.exceptionOrNull()
+            contextExtractedQuestions = emptyList()
+            contextDomImages = emptyList()
+            contextPageUrl = snap.url
+            uiState = uiState.withClearedDomContext().copy(
+                domStatus = "文本为空",
+                availableContextSources = availableSources,
+                hasObfuscatedFont = snap.hasObfuscatedFont,
+                warningText = err?.message ?: "页面文本为空，建议使用「截屏框选」"
+            )
+            return false
+        }
+
+        val text = textResult.getOrThrow()
+        val allValidQuestions = snap.extractedQuestions.filter { it.question.isNotBlank() }
+        val activeQuestionIndices = currentActiveQuestionIndices(allValidQuestions)
+        val selectedQuestions = if (effectiveSource == DomContextSource.QUESTIONS) {
+            snap.questionsForSelection(selectedQuestionIndices)
+        } else {
+            emptyList()
+        }
+
+        val questionChips = if (effectiveSource == DomContextSource.QUESTIONS && allValidQuestions.isNotEmpty()) {
+            allValidQuestions.mapIndexed { idx, item ->
+                DomQuestionChipItem(
+                    index = idx,
+                    label = "第${idx + 1}题",
+                    preview = item.question.trim().replace('\n', ' ').take(24),
+                    selected = idx in activeQuestionIndices
+                )
+            }
+        } else {
+            emptyList()
+        }
+
+        val unfilteredScopeImages = snap.activeImages(effectiveSource, selectedQuestionIndices, emptySet())
+        val includedImages = snap.activeImages(effectiveSource, selectedQuestionIndices, excludedImageIndices)
+        val includedIndexSet = includedImages.mapTo(HashSet()) { it.index }
+
+        contextDomImages = includedImages
+        contextPageUrl = snap.url
+        contextExtractedQuestions = if (snap.hasObfuscatedFont || effectiveSource != DomContextSource.QUESTIONS) {
+            emptyList()
+        } else {
+            selectedQuestions.mapNotNull { item ->
+                val cleanStem = OverlayPromptBuilder.sanitizeForTikuSearch(item.question)
+                val cleanOpts = item.options
+                    .map { OverlayPromptBuilder.sanitizeForTikuSearch(it) }
+                    .filter { it.isNotEmpty() }
+                if (cleanStem.length < 3 && cleanOpts.isEmpty()) {
+                    null
+                } else {
+                    TikuSearchRequest(
+                        question = cleanStem,
+                        options = cleanOpts,
+                        type = item.type
                     )
-                    if (autoAskAfter) {
-                        val prompt = configStore.load().overlayPrefs.quickAskPrompt
-                        sendQuickAction(
-                            displayLabel = OverlayPromptBuilder.DEFAULT_EMPTY_DOM_LABEL,
-                            instruction = prompt,
-                            allowTikuPresearch = true
+                }
+            }
+        }
+
+        val previews = unfilteredScopeImages.map { item ->
+            DomImagePreviewItem(
+                index = item.index,
+                bitmap = thumbnailCache[item.index],
+                isFormula = item.isFormula,
+                label = if (item.isFormula) "公式${item.index}" else "图${item.index}",
+                included = item.index in includedIndexSet
+            )
+        }
+
+        val modeLabel = effectiveSource.displayLabel
+        val titlePart = snap.title.ifBlank { snap.url }.ifBlank { "无标题" }
+        uiState = uiState.copy(
+            domStatus = "已抓取 · $modeLabel",
+            contextMeta = "已附带网页 · $modeLabel · ${selectedQuestions.size} 题 · ${includedImages.size} 图 · ${text.length} 字 · $titlePart",
+            contextText = text,
+            domQuestionCount = selectedQuestions.size,
+            domImageCount = includedImages.size,
+            warningText = snap.warningMessage().orEmpty(),
+            activeContextSource = effectiveSource,
+            availableContextSources = availableSources,
+            questionChips = questionChips,
+            domImagePreviews = previews,
+            hasObfuscatedFont = snap.hasObfuscatedFont
+        )
+
+        if (loadThumbnails) {
+            val missing = unfilteredScopeImages.filter { it.index !in thumbnailCache }
+            if (missing.isNotEmpty()) {
+                thumbnailLoadJob?.cancel()
+                thumbnailLoadJob = scope.launch {
+                    for (item in missing) {
+                        ensureActive()
+                        val bmp = domImageFetcher.decodeThumbnail(item, snap.url)
+                        if (!isActive || activeDomSnapshot !== snap) {
+                            if (bmp != null && !bmp.isRecycled) {
+                                runCatching { bmp.recycle() }
+                            }
+                            return@launch
+                        }
+                        thumbnailCache[item.index] = bmp
+                        uiState = uiState.copy(
+                            domImagePreviews = uiState.domImagePreviews.map { preview ->
+                                if (preview.index == item.index) preview.copy(bitmap = bmp) else preview
+                            }
                         )
                     }
                 }
-                .onFailure { err ->
-                    uiState = uiState.copy(
-                        domStatus = "文本为空",
-                        domQuestionCount = 0,
-                        domImageCount = 0,
-                        warningText = err.message ?: "页面文本为空，建议使用「截屏框选」"
-                    )
-                }
+            }
         }
+        return true
     }
 
     private fun triggerScreenCaptureFlow() {
@@ -781,9 +963,6 @@ class OverlayService : Service() {
             mainHandler.post {
                 dismissCropOverlay()
                 val oldImg = uiState.attachedImage
-                if (oldImg != null && oldImg !== previewBmp && !oldImg.isRecycled) {
-                    runCatching { oldImg.recycle() }
-                }
                 activeAttachedImageBase64 = base64Jpeg
                 uiState = uiState.copy(
                     attachedImage = previewBmp,
@@ -791,6 +970,7 @@ class OverlayService : Service() {
                     contextMeta = if (uiState.contextText.isNotBlank()) uiState.contextMeta else "",
                     warningText = ""
                 )
+                recycleUnreferencedBitmaps(listOf(oldImg))
                 expandPanel(autoCaptureDom = false)
             }
         }
@@ -807,26 +987,68 @@ class OverlayService : Service() {
         }
     }
 
-    private fun clearContextText() {
+    private fun OverlayUiState.withClearedDomContext(): OverlayUiState = copy(
+        contextText = "",
+        domStatus = "等待采集",
+        contextMeta = "",
+        domQuestionCount = 0,
+        domImageCount = 0,
+        isContextPreviewExpanded = false,
+        activeContextSource = null,
+        availableContextSources = emptyList(),
+        questionChips = emptyList(),
+        domImagePreviews = emptyList(),
+        hasObfuscatedFont = false
+    )
+
+    private fun resetDomSessionVariables(): List<Bitmap> {
+        thumbnailLoadJob?.cancel()
+        thumbnailLoadJob = null
+        val oldThumbs = thumbnailCache.values.filterNotNull().distinct()
+        thumbnailCache.clear()
+        activeDomSnapshot = null
+        selectedContextSourceOverride = null
+        selectedQuestionIndices = null
+        excludedImageIndices.clear()
         contextExtractedQuestions = emptyList()
         contextDomImages = emptyList()
         contextPageUrl = ""
-        uiState = uiState.copy(
-            contextText = "",
-            domStatus = "等待采集",
-            contextMeta = "",
-            domQuestionCount = 0,
-            domImageCount = 0
-        )
+        return oldThumbs
+    }
+
+    private fun clearDomSessionState(resetUiState: Boolean = true) {
+        val oldThumbs = resetDomSessionVariables()
+        if (resetUiState) {
+            uiState = uiState.withClearedDomContext()
+        }
+        recycleUnreferencedBitmaps(oldThumbs)
+    }
+
+    private fun recycleUnreferencedBitmaps(candidates: Collection<Bitmap?>) {
+        if (candidates.isEmpty()) return
+        val liveRefs = HashSet<Bitmap>()
+        uiState.attachedImage?.let { liveRefs.add(it) }
+        uiState.messages.forEach { msg -> msg.imagePreview?.let { liveRefs.add(it) } }
+        uiState.domImagePreviews.forEach { preview -> preview.bitmap?.let { liveRefs.add(it) } }
+        thumbnailCache.values.forEach { bmp -> if (bmp != null) liveRefs.add(bmp) }
+
+        for (bmp in candidates) {
+            if (bmp != null && !bmp.isRecycled && bmp !in liveRefs) {
+                runCatching { bmp.recycle() }
+            }
+        }
+    }
+
+    private fun clearContextText() {
+        clearDomSessionState(resetUiState = true)
+        uiState = uiState.copy(warningText = "")
     }
 
     private fun clearAttachedImage() {
         val old = uiState.attachedImage
         activeAttachedImageBase64 = null
         uiState = uiState.copy(attachedImage = null)
-        if (old != null && !old.isRecycled && uiState.messages.none { it.imagePreview === old }) {
-            runCatching { old.recycle() }
-        }
+        recycleUnreferencedBitmaps(listOf(old))
     }
 
     private fun pasteFromClipboard() {
@@ -837,17 +1059,14 @@ class OverlayService : Service() {
             uiState = uiState.copy(warningText = "剪贴板为空，无法导入文本")
             return
         }
-        contextExtractedQuestions = emptyList()
-        contextDomImages = emptyList()
-        contextPageUrl = ""
-        uiState = uiState.copy(
+        val oldThumbs = resetDomSessionVariables()
+        uiState = uiState.withClearedDomContext().copy(
             contextText = text,
             contextMeta = "已附带剪贴板 · ${text.length} 字",
             domStatus = "已粘贴",
-            domQuestionCount = 0,
-            domImageCount = 0,
             warningText = ""
         )
+        recycleUnreferencedBitmaps(oldThumbs)
     }
 
     private fun currentQuoteBadge(hasContext: Boolean): String {
@@ -895,12 +1114,16 @@ class OverlayService : Service() {
             return
         }
 
-        val requests = extractSanitizedPresearchQuestions(ctxText, input)
+        val isObfuscatedDom = ctxText.isNotEmpty() && uiState.hasObfuscatedFont
+        val requests = extractSanitizedPresearchQuestions(
+            ctxText = if (isObfuscatedDom) "" else ctxText,
+            fallbackText = input
+        )
         if (requests.isEmpty()) {
-            val hint = if (hasDomImages) {
-                "检测到纯图片或公式图题目，当前未提取到可查文本，请点击「直接解题」交由多模态 AI 解析"
-            } else {
-                "未提取到可检索的题目内容"
+            val hint = when {
+                isObfuscatedDom -> "检测到加密混淆字体，文本题库检索已跳过，请点击「直接解题」或「截屏框选」交由多模态 AI 解析"
+                hasDomImages -> "检测到纯图片或公式图题目，当前未提取到可查文本，请点击「直接解题」交由多模态 AI 解析"
+                else -> "未提取到可检索的题目内容"
             }
             uiState = uiState.copy(warningText = hint)
             return
@@ -936,22 +1159,15 @@ class OverlayService : Service() {
         )
 
         conversationHistory.add(ChatTurn(role = "user", content = userTurnContent))
-        if (hasContext) {
-            contextExtractedQuestions = emptyList()
-            contextDomImages = emptyList()
-            contextPageUrl = ""
-        }
-        uiState = uiState.copy(
-            contextText = if (hasContext) "" else uiState.contextText,
-            domStatus = if (hasContext) "等待采集" else uiState.domStatus,
-            contextMeta = if (hasContext) "" else uiState.contextMeta,
-            domQuestionCount = if (hasContext) 0 else uiState.domQuestionCount,
-            domImageCount = if (hasContext) 0 else uiState.domImageCount,
+        val oldThumbs = if (hasContext) resetDomSessionVariables() else emptyList()
+        val baseState = if (hasContext) uiState.withClearedDomContext() else uiState
+        uiState = baseState.copy(
             draftPrompt = "",
             warningText = "",
-            messages = uiState.messages + userUiMsg + assistantPlaceholder,
+            messages = baseState.messages + userUiMsg + assistantPlaceholder,
             isGenerating = true
         )
+        recycleUnreferencedBitmaps(oldThumbs)
 
         activeChatJob?.cancel()
         activeChatJob = scope.launch {
@@ -984,7 +1200,7 @@ class OverlayService : Service() {
         val imgB64 = activeAttachedImageBase64
         val imgPreview = uiState.attachedImage
         val ctxText = uiState.contextText.trim()
-        val presearchQuestions = if (allowTikuPresearch) {
+        val presearchQuestions = if (allowTikuPresearch && !uiState.hasObfuscatedFont) {
             extractSanitizedPresearchQuestions(ctxText, "")
         } else {
             emptyList()
@@ -1024,7 +1240,10 @@ class OverlayService : Service() {
         val quickAskPrompt = configStore.load().overlayPrefs.quickAskPrompt
         val ctxText = uiState.contextText.trim()
         val input = uiState.draftPrompt.trim()
-        val presearchQuestions = extractSanitizedPresearchQuestions(ctxText, input)
+        val presearchQuestions = extractSanitizedPresearchQuestions(
+            ctxText = if (uiState.hasObfuscatedFont) "" else ctxText,
+            fallbackText = input
+        )
         val pendingDomImages = if (ctxText.isNotEmpty()) contextDomImages else emptyList()
         val pendingPageUrl = if (ctxText.isNotEmpty()) contextPageUrl else ""
         val built = OverlayPromptBuilder.buildManual(
@@ -1100,22 +1319,20 @@ class OverlayService : Service() {
     private fun clearAllChat() {
         activeChatJob?.cancel()
         activeChatJob = null
+        activeDomCaptureJob?.cancel()
+        activeDomCaptureJob = null
         conversationHistory.clear()
-        contextExtractedQuestions = emptyList()
-        contextDomImages = emptyList()
-        contextPageUrl = ""
-        clearAttachedImage()
-        uiState = uiState.copy(
+        val oldThumbs = resetDomSessionVariables()
+        val oldAttached = uiState.attachedImage
+        activeAttachedImageBase64 = null
+        uiState = uiState.withClearedDomContext().copy(
             messages = emptyList(),
             isGenerating = false,
-            contextText = "",
+            attachedImage = null,
             draftPrompt = "",
-            domStatus = "等待采集",
-            contextMeta = "",
-            domQuestionCount = 0,
-            domImageCount = 0,
             warningText = ""
         )
+        recycleUnreferencedBitmaps(oldThumbs + listOfNotNull(oldAttached))
     }
 
     private fun launchChatTurn(
@@ -1148,12 +1365,12 @@ class OverlayService : Service() {
             }
         }
 
-        if (consumeContext) {
+        val oldThumbs = if (consumeContext) {
             // Consume pending cropped attachment and DOM questions/images after attaching them to this turn.
             activeAttachedImageBase64 = null
-            contextExtractedQuestions = emptyList()
-            contextDomImages = emptyList()
-            contextPageUrl = ""
+            resetDomSessionVariables()
+        } else {
+            emptyList()
         }
         val userUiMsg = ChatUiMessage(
             id = nextMsgId++,
@@ -1186,18 +1403,18 @@ class OverlayService : Service() {
                 images = preResolvedImages
             )
         )
-        uiState = uiState.copy(
-            attachedImage = if (consumeContext) null else uiState.attachedImage,
-            contextText = if (consumeContext) "" else uiState.contextText,
-            domStatus = if (consumeContext) "等待采集" else uiState.domStatus,
-            contextMeta = if (consumeContext) "" else uiState.contextMeta,
-            domQuestionCount = if (consumeContext) 0 else uiState.domQuestionCount,
-            domImageCount = if (consumeContext) 0 else uiState.domImageCount,
-            draftPrompt = if (clearDraft) "" else uiState.draftPrompt,
+        val baseState = if (consumeContext) {
+            uiState.withClearedDomContext().copy(attachedImage = null)
+        } else {
+            uiState
+        }
+        uiState = baseState.copy(
+            draftPrompt = if (clearDraft) "" else baseState.draftPrompt,
             warningText = "",
-            messages = uiState.messages + userUiMsg + assistantPlaceholder,
+            messages = baseState.messages + userUiMsg + assistantPlaceholder,
             isGenerating = true
         )
+        recycleUnreferencedBitmaps(oldThumbs)
 
         val textSb = StringBuilder()
         val reasoningSb = StringBuilder()
@@ -1268,9 +1485,10 @@ class OverlayService : Service() {
             val finalTurnImages = preResolvedImages.ifEmpty {
                 resolvedDomImages.map { it.chatImage }
             }
+            val attachmentOffset = if (!imageBase64Jpeg.isNullOrBlank()) 1 else 0
             val imageMappingHint = if (resolvedDomImages.isNotEmpty()) {
                 reasoningSb.append("已随题附加 ").append(resolvedDomImages.size).append(" 张页面附图。\n")
-                DomImageFetcher.buildImageMappingHint(resolvedDomImages)
+                DomImageFetcher.buildImageMappingHint(resolvedDomImages, attachmentOffset = attachmentOffset)
             } else {
                 ""
             }
