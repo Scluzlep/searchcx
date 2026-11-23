@@ -70,10 +70,88 @@ data class ChatUiMessage(
     val id: Long,
     val role: String,
     val content: String,
+    val contextBadge: String = "",
     val reasoning: String = "",
     val imagePreview: Bitmap? = null,
     val isStreaming: Boolean = false
 )
+
+data class BuiltPrompt(
+    val visibleUserText: String,
+    val contextBadge: String,
+    val apiPrompt: String
+)
+
+/**
+ * Pure JVM helper that separates short user-facing bubble text + context badge
+ * from the full API prompt containing raw page DOM context.
+ */
+object OverlayPromptBuilder {
+    const val CONTEXT_BADGE_WEB = "已附带网页"
+    const val DEFAULT_EMPTY_DOM_LABEL = "解析网页内容"
+    const val DEFAULT_IMAGE_ONLY_LABEL = "解析截图内容"
+    const val DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
+
+    fun buildManual(
+        rawInput: String,
+        rawContextText: String,
+        hasImage: Boolean,
+        quickAskPrompt: String = DEFAULT_QUICK_ASK_PROMPT
+    ): BuiltPrompt? {
+        val input = rawInput.trim()
+        val ctxText = rawContextText.trim()
+        val askPrompt = quickAskPrompt.trim().ifEmpty { DEFAULT_QUICK_ASK_PROMPT }
+
+        return when {
+            input.isNotEmpty() && ctxText.isNotEmpty() -> BuiltPrompt(
+                visibleUserText = input,
+                contextBadge = CONTEXT_BADGE_WEB,
+                apiPrompt = "$input\n\n[页面上下文]\n$ctxText"
+            )
+            input.isNotEmpty() -> BuiltPrompt(
+                visibleUserText = input,
+                contextBadge = "",
+                apiPrompt = input
+            )
+            ctxText.isNotEmpty() -> BuiltPrompt(
+                visibleUserText = DEFAULT_EMPTY_DOM_LABEL,
+                contextBadge = CONTEXT_BADGE_WEB,
+                apiPrompt = "$askPrompt\n\n[页面上下文]\n$ctxText"
+            )
+            hasImage -> BuiltPrompt(
+                visibleUserText = DEFAULT_IMAGE_ONLY_LABEL,
+                contextBadge = "",
+                apiPrompt = askPrompt
+            )
+            else -> null
+        }
+    }
+
+    fun buildQuickAction(
+        displayLabel: String,
+        instruction: String,
+        rawContextText: String,
+        hasImage: Boolean
+    ): BuiltPrompt? {
+        val ctxText = rawContextText.trim()
+        if (ctxText.isEmpty() && !hasImage) return null
+
+        val instr = instruction.trim()
+        val label = displayLabel.trim().ifEmpty {
+            if (ctxText.isNotEmpty()) DEFAULT_EMPTY_DOM_LABEL else instr.ifEmpty { DEFAULT_IMAGE_ONLY_LABEL }
+        }
+        val apiPrompt = when {
+            instr.isNotEmpty() && ctxText.isNotEmpty() -> "$instr\n\n[页面上下文]\n$ctxText"
+            instr.isNotEmpty() -> instr
+            else -> ctxText
+        }
+        return BuiltPrompt(
+            visibleUserText = label,
+            contextBadge = if (ctxText.isNotEmpty()) CONTEXT_BADGE_WEB else "",
+            apiPrompt = apiPrompt
+        )
+    }
+}
 
 data class OverlayUiState(
     val profiles: List<ProviderProfile> = emptyList(),
@@ -81,10 +159,9 @@ data class OverlayUiState(
     val activeProfileName: String = "OpenAI",
     val activeModel: String = "gpt-4o-mini",
     val domStatus: String = "等待采集",
-    val contextMeta: String = "点「读DOM」或「截屏框选」提取题目",
+    val contextMeta: String = "",
     val warningText: String = "",
     val contextText: String = "",
-    val contextExpanded: Boolean = false,
     val attachedImage: Bitmap? = null,
     val messages: List<ChatUiMessage> = emptyList(),
     val isGenerating: Boolean = false,
@@ -220,7 +297,6 @@ fun FloatingBallComposable(
 fun FloatingPanelComposable(
     state: OverlayUiState,
     promptFocusRequester: FocusRequester,
-    contextFocusRequester: FocusRequester,
     onDragDelta: (dx: Int, dy: Int) -> Unit,
     onSelectProfile: (String) -> Unit,
     onCaptureDom: () -> Unit,
@@ -230,11 +306,9 @@ fun FloatingPanelComposable(
     onToggleOpacityBar: () -> Unit,
     onSetOpacity: (Float) -> Unit,
     onCollapse: () -> Unit,
-    onCloseService: () -> Unit,
-    onToggleContextExpanded: () -> Unit,
-    onContextTextChange: (String) -> Unit,
+    onClearContext: () -> Unit,
     onRemoveAttachedImage: () -> Unit,
-    onQuickAction: (instruction: String) -> Unit,
+    onQuickAction: (displayLabel: String, instruction: String) -> Unit,
     onDraftChange: (String) -> Unit,
     onSendOrStop: () -> Unit,
     onClearChat: () -> Unit,
@@ -346,7 +420,6 @@ fun FloatingPanelComposable(
                     SmallHeaderIconButton(if (state.isTallMode) "半" else "全", onToggleTall)
                     SmallHeaderIconButton("透", onToggleOpacityBar)
                     SmallHeaderIconButton("—", onCollapse)
-                    SmallHeaderIconButton("×", onCloseService, fg = Color(0xFFDC2626))
                 }
 
                 // Profile switcher tray
@@ -421,39 +494,48 @@ fun FloatingPanelComposable(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ActionPill("读DOM", ACCENT_SOFT, ACCENT_BLUE, Modifier.weight(1f), onCaptureDom)
+                    val domLabel = if (state.domStatus == "抓取 DOM 中...") "抓取中..." else "读DOM"
+                    ActionPill(domLabel, ACCENT_SOFT, ACCENT_BLUE, Modifier.weight(1f), onCaptureDom)
                     ActionPill("截屏框选", ACCENT_BLUE, Color.White, Modifier.weight(1.1f), onCaptureScreen)
                     ActionPill("剪贴板", SURFACE_GRAY, TEXT_PRIMARY, Modifier.weight(0.85f), onPasteClipboard)
                     ActionPill("清空", SURFACE_GRAY, TEXT_SECONDARY, Modifier.weight(0.65f), onClearChat)
                 }
             }
 
-            // Read-only DOM + Screenshot context card
+            // Compact context chips + quick actions strip
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFFFAFAFC))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onToggleContextExpanded),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    BasicText(
-                        text = state.contextMeta,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = TextStyle(color = TEXT_SECONDARY, fontSize = 11.sp, fontWeight = FontWeight.Medium),
-                        modifier = Modifier.weight(1f)
-                    )
-                    BasicText(
-                        text = "${state.domStatus} · ${if (state.contextExpanded) "收起" else "展开"}",
-                        style = TextStyle(color = ACCENT_BLUE, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    )
+                if (state.contextText.isNotBlank()) {
+                    val chipText = state.contextMeta.ifBlank {
+                        "已附带网页 · ${state.contextText.length} 字"
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ACCENT_SOFT)
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        BasicText(
+                            text = chipText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = TextStyle(
+                                color = ACCENT_BLUE,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        CompactRemoveButton(onClick = onClearContext)
+                    }
                 }
 
                 if (state.warningText.isNotBlank()) {
@@ -501,51 +583,7 @@ fun FloatingPanelComposable(
                                 style = TextStyle(color = TEXT_SECONDARY, fontSize = 11.sp)
                             )
                         }
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.White)
-                                .clickable(onClick = onRemoveAttachedImage)
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
-                        ) {
-                            BasicText(
-                                text = "移除",
-                                style = TextStyle(color = Color(0xFFDC2626), fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                            )
-                        }
-                    }
-                }
-
-                AnimatedVisibility(visible = state.contextExpanded) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 54.dp, max = 112.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(SURFACE_GRAY)
-                            .padding(8.dp)
-                            .pointerInput(Unit) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    onRequestImeFocus(contextFocusRequester)
-                                }
-                            }
-                    ) {
-                        if (state.contextText.isEmpty()) {
-                            BasicText(
-                                text = "网页内容，可编辑后发送",
-                                style = TextStyle(color = Color(0xFF9CA3AF), fontSize = 12.sp)
-                            )
-                        }
-                        BasicTextField(
-                            value = state.contextText,
-                            onValueChange = onContextTextChange,
-                            textStyle = TextStyle(color = TEXT_PRIMARY, fontSize = 12.sp, lineHeight = 17.sp),
-                            cursorBrush = SolidColor(ACCENT_BLUE),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(contextFocusRequester)
-                        )
+                        CompactRemoveButton(onClick = onRemoveAttachedImage)
                     }
                 }
 
@@ -557,16 +595,16 @@ fun FloatingPanelComposable(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     QuickChip("直接解题") {
-                        onQuickAction("请直接解答以下题目或问题，给出关键推导步骤与最终结论：")
+                        onQuickAction("直接解题", "请直接解答以下题目或问题，给出关键推导步骤与最终结论：")
                     }
                     QuickChip("总结要点") {
-                        onQuickAction("请提取并条理化总结以下内容的核心要点：")
+                        onQuickAction("总结要点", "请提取并条理化总结以下内容的核心要点：")
                     }
                     QuickChip("准确翻译") {
-                        onQuickAction("请将以下内容准确翻译为中文：")
+                        onQuickAction("准确翻译", "请将以下内容准确翻译为中文：")
                     }
-                    QuickChip("仅发原文/图") {
-                        onQuickAction("")
+                    QuickChip("仅发原文") {
+                        onQuickAction("仅发原文", "")
                     }
                 }
             }
@@ -632,6 +670,23 @@ fun FloatingPanelComposable(
                                     text = msg.content.ifBlank { "[仅发送图片]" },
                                     style = TextStyle(color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
                                 )
+                                if (msg.contextBadge.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0x2EFFFFFF))
+                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                    ) {
+                                        BasicText(
+                                            text = msg.contextBadge,
+                                            style = TextStyle(
+                                                color = Color(0xF2FFFFFF),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                    }
+                                }
                             } else {
                                 MarkdownMessageView(
                                     rawText = msg.content,
@@ -732,8 +787,7 @@ fun FloatingPanelComposable(
 @Composable
 private fun SmallHeaderIconButton(
     label: String,
-    onClick: () -> Unit,
-    fg: Color = TEXT_PRIMARY
+    onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -745,7 +799,23 @@ private fun SmallHeaderIconButton(
     ) {
         BasicText(
             text = label,
-            style = TextStyle(color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            style = TextStyle(color = TEXT_PRIMARY, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        )
+    }
+}
+
+@Composable
+private fun CompactRemoveButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        BasicText(
+            text = "移除",
+            style = TextStyle(color = Color(0xFFDC2626), fontSize = 11.sp, fontWeight = FontWeight.Medium)
         )
     }
 }

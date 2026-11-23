@@ -86,7 +86,6 @@ class OverlayService : Service() {
     private var activeScreenshot: Bitmap? = null
 
     private val promptFocusRequester = FocusRequester()
-    private val contextFocusRequester = FocusRequester()
 
     private var activeAttachedImageBase64: String? = null
     private var isExpanded = false
@@ -369,7 +368,6 @@ class OverlayService : Service() {
                     FloatingPanelComposable(
                         state = uiState,
                         promptFocusRequester = promptFocusRequester,
-                        contextFocusRequester = contextFocusRequester,
                         onDragDelta = { dx, dy ->
                             panelParams.x = (panelParams.x + dx).coerceIn(-dm.widthPixels / 3, dm.widthPixels - dpToPx(80))
                             panelParams.y = (panelParams.y + dy).coerceIn(0, dm.heightPixels - dpToPx(120))
@@ -392,11 +390,9 @@ class OverlayService : Service() {
                             uiState = uiState.copy(panelOpacity = op)
                         },
                         onCollapse = { collapseToConfiguredEntry() },
-                        onCloseService = { stopSelf() },
-                        onToggleContextExpanded = { uiState = uiState.copy(contextExpanded = !uiState.contextExpanded) },
-                        onContextTextChange = { uiState = uiState.copy(contextText = it) },
+                        onClearContext = { clearContextText() },
                         onRemoveAttachedImage = { clearAttachedImage() },
-                        onQuickAction = { instruction -> sendQuickAction(instruction) },
+                        onQuickAction = { label, instruction -> sendQuickAction(label, instruction) },
                         onDraftChange = { uiState = uiState.copy(draftPrompt = it) },
                         onSendOrStop = {
                             if (uiState.isGenerating) {
@@ -627,7 +623,7 @@ class OverlayService : Service() {
             if (snap.hasError()) {
                 uiState = uiState.copy(
                     domStatus = "未检测到",
-                    contextMeta = "来源: ${snap.sourcePackage.ifBlank { "未知" }}",
+                    contextMeta = if (uiState.contextText.isNotBlank()) uiState.contextMeta else "",
                     warningText = snap.error.orEmpty()
                 )
                 return@launch
@@ -639,13 +635,16 @@ class OverlayService : Service() {
                 .onSuccess { text ->
                     uiState = uiState.copy(
                         domStatus = "已抓取 · $modeLabel",
-                        contextMeta = "[$modeLabel] ${snap.sourcePackage} · $titlePart",
+                        contextMeta = "已附带网页 · $modeLabel · ${text.length} 字 · $titlePart",
                         contextText = text,
                         warningText = snap.warningMessage().orEmpty()
                     )
                     if (autoAskAfter) {
                         val prompt = configStore.load().overlayPrefs.quickAskPrompt
-                        sendQuickAction(prompt)
+                        sendQuickAction(
+                            displayLabel = OverlayPromptBuilder.DEFAULT_EMPTY_DOM_LABEL,
+                            instruction = prompt
+                        )
                     }
                 }
                 .onFailure { err ->
@@ -741,8 +740,8 @@ class OverlayService : Service() {
                 activeAttachedImageBase64 = base64Jpeg
                 uiState = uiState.copy(
                     attachedImage = previewBmp,
-                    domStatus = "已截取图像",
-                    contextMeta = "[截屏框选] ${previewBmp.width}×${previewBmp.height}",
+                    domStatus = if (uiState.contextText.isNotBlank()) uiState.domStatus else "已截取图像",
+                    contextMeta = if (uiState.contextText.isNotBlank()) uiState.contextMeta else "",
                     warningText = ""
                 )
                 expandPanel(autoCaptureDom = false)
@@ -759,6 +758,14 @@ class OverlayService : Service() {
         if (old != null && !old.isRecycled) {
             runCatching { old.recycle() }
         }
+    }
+
+    private fun clearContextText() {
+        uiState = uiState.copy(
+            contextText = "",
+            domStatus = "等待采集",
+            contextMeta = ""
+        )
     }
 
     private fun clearAttachedImage() {
@@ -780,65 +787,98 @@ class OverlayService : Service() {
         }
         uiState = uiState.copy(
             contextText = text,
-            contextMeta = "[剪贴板] ${text.length} 字符",
+            contextMeta = "已附带剪贴板 · ${text.length} 字",
             domStatus = "已粘贴",
             warningText = ""
         )
     }
 
-    private fun sendQuickAction(instruction: String) {
-        val ctxText = uiState.contextText.trim()
+    private fun sendQuickAction(displayLabel: String, instruction: String) {
+        disablePanelImeFocus(hideIme = true)
+        if (uiState.isGenerating) {
+            stopGeneration()
+        }
         val imgB64 = activeAttachedImageBase64
         val imgPreview = uiState.attachedImage
-        if (ctxText.isEmpty() && imgB64.isNullOrBlank()) {
+        val built = OverlayPromptBuilder.buildQuickAction(
+            displayLabel = displayLabel,
+            instruction = instruction,
+            rawContextText = uiState.contextText,
+            hasImage = !imgB64.isNullOrBlank()
+        )
+        if (built == null) {
             uiState = uiState.copy(warningText = "请先点击「读DOM」「截屏框选」或「剪贴板」获取内容")
             return
         }
-
-        val finalPrompt = when {
-            instruction.isNotBlank() && ctxText.isNotBlank() -> "$instruction\n\n[页面上下文]\n$ctxText"
-            instruction.isNotBlank() -> instruction
-            else -> ctxText
-        }
-        launchChatTurn(finalPrompt, imgB64, imgPreview)
+        launchChatTurn(
+            visibleUserText = built.visibleUserText,
+            contextBadge = built.contextBadge,
+            apiPrompt = built.apiPrompt,
+            imageBase64Jpeg = imgB64,
+            imagePreview = imgPreview,
+            clearDraft = false,
+            consumeContext = true
+        )
     }
 
     private fun sendManualPrompt() {
         disablePanelImeFocus(hideIme = true)
-        val input = uiState.draftPrompt.trim()
-        val ctxText = uiState.contextText.trim()
         val imgB64 = activeAttachedImageBase64
         val imgPreview = uiState.attachedImage
-
-        val finalPrompt = when {
-            input.isNotEmpty() && ctxText.isNotEmpty() && conversationHistory.isEmpty() ->
-                "$input\n\n[页面上下文]\n$ctxText"
-            input.isNotEmpty() -> input
-            ctxText.isNotEmpty() && conversationHistory.isEmpty() -> ctxText
-            !imgB64.isNullOrBlank() -> configStore.load().overlayPrefs.quickAskPrompt
-            else -> {
-                uiState = uiState.copy(warningText = "请输入问题，或先读取网页 DOM / 截屏框选")
-                return
-            }
+        val quickAskPrompt = configStore.load().overlayPrefs.quickAskPrompt
+        val built = OverlayPromptBuilder.buildManual(
+            rawInput = uiState.draftPrompt,
+            rawContextText = uiState.contextText,
+            hasImage = !imgB64.isNullOrBlank(),
+            quickAskPrompt = quickAskPrompt
+        )
+        if (built == null) {
+            uiState = uiState.copy(warningText = "请输入问题，或先读取网页 DOM / 截屏框选")
+            return
         }
-        uiState = uiState.copy(draftPrompt = "")
-        launchChatTurn(finalPrompt, imgB64, imgPreview)
+        launchChatTurn(
+            visibleUserText = built.visibleUserText,
+            contextBadge = built.contextBadge,
+            apiPrompt = built.apiPrompt,
+            imageBase64Jpeg = imgB64,
+            imagePreview = imgPreview,
+            clearDraft = true,
+            consumeContext = true
+        )
     }
 
     private fun regenerateLastTurn() {
         if (uiState.isGenerating) return
         val lastUserIdx = conversationHistory.indexOfLast { it.role == "user" }
         if (lastUserIdx < 0) return
+        val cfg = configStore.load()
+        val profile = cfg.activeProfile()
+        runCatching { profile.activeBearerToken() }.onFailure { err ->
+            uiState = uiState.copy(warningText = err.message ?: "请先在主界面配置模型密钥或 OAuth 登录")
+            return
+        }
+
         val lastUserTurn = conversationHistory[lastUserIdx]
         while (conversationHistory.size > lastUserIdx) {
             conversationHistory.removeAt(conversationHistory.lastIndex)
         }
         val uiLastUserIdx = uiState.messages.indexOfLast { it.role == "user" }
-        val imgPrev = if (uiLastUserIdx >= 0) uiState.messages[uiLastUserIdx].imagePreview else null
+        val lastUiMsg = if (uiLastUserIdx >= 0) uiState.messages[uiLastUserIdx] else null
+        val visibleUserText = lastUiMsg?.content ?: lastUserTurn.content
+        val contextBadge = lastUiMsg?.contextBadge.orEmpty()
+        val imgPrev = lastUiMsg?.imagePreview
         if (uiLastUserIdx >= 0) {
             uiState = uiState.copy(messages = uiState.messages.take(uiLastUserIdx))
         }
-        launchChatTurn(lastUserTurn.content, lastUserTurn.imageBase64Jpeg, imgPrev)
+        launchChatTurn(
+            visibleUserText = visibleUserText,
+            contextBadge = contextBadge,
+            apiPrompt = lastUserTurn.content,
+            imageBase64Jpeg = lastUserTurn.imageBase64Jpeg,
+            imagePreview = imgPrev,
+            clearDraft = false,
+            consumeContext = false
+        )
     }
 
     private fun stopGeneration() {
@@ -861,15 +901,19 @@ class OverlayService : Service() {
             contextText = "",
             draftPrompt = "",
             domStatus = "等待采集",
-            contextMeta = "点「读DOM」或「截屏框选」提取题目",
+            contextMeta = "",
             warningText = ""
         )
     }
 
     private fun launchChatTurn(
-        userPrompt: String,
+        visibleUserText: String,
+        contextBadge: String,
+        apiPrompt: String,
         imageBase64Jpeg: String?,
-        imagePreview: Bitmap?
+        imagePreview: Bitmap?,
+        clearDraft: Boolean,
+        consumeContext: Boolean
     ) {
         val cfg = configStore.load()
         val profile = cfg.activeProfile()
@@ -878,12 +922,15 @@ class OverlayService : Service() {
             return
         }
 
-        // Consume pending cropped attachment after attaching it to this user turn.
-        activeAttachedImageBase64 = null
+        if (consumeContext) {
+            // Consume pending cropped attachment after attaching it to this user turn.
+            activeAttachedImageBase64 = null
+        }
         val userUiMsg = ChatUiMessage(
             id = nextMsgId++,
             role = "user",
-            content = userPrompt,
+            content = visibleUserText,
+            contextBadge = contextBadge,
             imagePreview = imagePreview,
             isStreaming = false
         )
@@ -896,9 +943,13 @@ class OverlayService : Service() {
             isStreaming = true
         )
 
-        conversationHistory.add(ChatTurn(role = "user", content = userPrompt, imageBase64Jpeg = imageBase64Jpeg))
+        conversationHistory.add(ChatTurn(role = "user", content = apiPrompt, imageBase64Jpeg = imageBase64Jpeg))
         uiState = uiState.copy(
-            attachedImage = null,
+            attachedImage = if (consumeContext) null else uiState.attachedImage,
+            contextText = if (consumeContext) "" else uiState.contextText,
+            domStatus = if (consumeContext) "等待采集" else uiState.domStatus,
+            contextMeta = if (consumeContext) "" else uiState.contextMeta,
+            draftPrompt = if (clearDraft) "" else uiState.draftPrompt,
             warningText = "",
             messages = uiState.messages + userUiMsg + assistantPlaceholder,
             isGenerating = true
