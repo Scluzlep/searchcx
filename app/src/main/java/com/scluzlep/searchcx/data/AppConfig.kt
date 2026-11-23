@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.scluzlep.searchcx.tiku.TikuConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -133,7 +134,8 @@ data class AppConfig(
     val activeProfileId: String = DEFAULT_OPENAI_ID,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val overlayPrefs: OverlayPrefs = OverlayPrefs(),
-    val hookTargetPackages: String = ""
+    val hookTargetPackages: String = "",
+    val tikuConfig: TikuConfig = TikuConfig()
 ) {
     fun activeProfile(): ProviderProfile {
         return profiles.firstOrNull { it.id == activeProfileId }
@@ -230,12 +232,21 @@ class AppConfigStore(context: Context) {
             OverlayPrefs()
         }
 
+        val rawTiku = prefs.getString(KEY_TIKU_CONFIG_JSON, null)
+        val tikuConfig = if (!rawTiku.isNullOrBlank()) {
+            runCatching { TikuConfig.fromJson(rawTiku) { decryptString(it) } }
+                .getOrDefault(TikuConfig())
+        } else {
+            TikuConfig()
+        }
+
         return AppConfig(
             profiles = profiles,
             activeProfileId = activeId,
             systemPrompt = systemPrompt,
             overlayPrefs = overlayPrefs,
-            hookTargetPackages = prefs.getString(KEY_HOOK_PACKAGES, "") ?: ""
+            hookTargetPackages = prefs.getString(KEY_HOOK_PACKAGES, "") ?: "",
+            tikuConfig = tikuConfig
         )
     }
 
@@ -251,6 +262,7 @@ class AppConfigStore(context: Context) {
             .putString(KEY_SYSTEM_PROMPT, config.systemPrompt.trim())
             .putString(KEY_OVERLAY_PREFS_JSON, encodeOverlayPrefs(config.overlayPrefs))
             .putString(KEY_HOOK_PACKAGES, config.hookTargetPackages.trim())
+            .putString(KEY_TIKU_CONFIG_JSON, config.tikuConfig.toJson { encryptString(it) })
             .commit()
         if (!ok) {
             throw IllegalStateException("Failed to persist configuration to SharedPreferences")
@@ -272,6 +284,14 @@ class AppConfigStore(context: Context) {
             val current = load()
             val next = transform(current.overlayPrefs)
             save(current.copy(overlayPrefs = next))
+            next
+        }
+
+    fun updateTikuConfig(transform: (TikuConfig) -> TikuConfig): TikuConfig =
+        synchronized(storeLock) {
+            val current = load()
+            val next = transform(current.tikuConfig)
+            save(current.copy(tikuConfig = next))
             next
         }
 
@@ -465,6 +485,7 @@ class AppConfigStore(context: Context) {
         private const val KEY_SYSTEM_PROMPT = "system_prompt"
         private const val KEY_OVERLAY_PREFS_JSON = "overlay_prefs_v2_json"
         private const val KEY_HOOK_PACKAGES = "hook_packages"
+        private const val KEY_TIKU_CONFIG_JSON = "tiku_config_v1_json"
         private const val KEY_PENDING_OAUTH_STATE = "pending_oauth_state"
         private const val KEY_PENDING_OAUTH_PROFILE_ID = "pending_oauth_profile_id"
         private const val KEY_PENDING_OAUTH_VERIFIER_ENC = "pending_oauth_verifier_enc"

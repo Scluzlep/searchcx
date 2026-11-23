@@ -45,7 +45,13 @@ import com.scluzlep.searchcx.ipc.DomSnapshotReceiver
 import com.scluzlep.searchcx.net.ChatTurn
 import com.scluzlep.searchcx.net.OpenAiClient
 import com.scluzlep.searchcx.net.StreamEvent
+import com.scluzlep.searchcx.tiku.OcsQuestionExtractor
+import com.scluzlep.searchcx.tiku.TikuAdapterClient
+import com.scluzlep.searchcx.tiku.TikuMarkdownFormatter
+import com.scluzlep.searchcx.tiku.TikuSearchRequest
+import com.scluzlep.searchcx.tiku.TikuSearchResult
 import com.scluzlep.searchcx.ui.MainActivity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,11 +73,13 @@ class OverlayService : Service() {
     private lateinit var configStore: AppConfigStore
     private lateinit var screenCapture: ScreenCaptureHelper
     private val openAiClient = OpenAiClient()
+    private val tikuClient = TikuAdapterClient()
     private val domReceiver = DomSnapshotReceiver()
 
     private var uiState by mutableStateOf(OverlayUiState())
     private val conversationHistory = mutableListOf<ChatTurn>()
     private var nextMsgId = 1L
+    private var contextExtractedQuestions: List<TikuSearchRequest> = emptyList()
 
     private var ballView: ComposeView? = null
     private lateinit var ballParams: WindowManager.LayoutParams
@@ -392,6 +400,7 @@ class OverlayService : Service() {
                         onCollapse = { collapseToConfiguredEntry() },
                         onClearContext = { clearContextText() },
                         onRemoveAttachedImage = { clearAttachedImage() },
+                        onSearchTikuOnly = { searchTikuOnly() },
                         onQuickAction = { label, instruction -> sendQuickAction(label, instruction) },
                         onDraftChange = { uiState = uiState.copy(draftPrompt = it) },
                         onSendOrStop = {
@@ -633,6 +642,13 @@ class OverlayService : Service() {
             val titlePart = snap.title.ifBlank { snap.url }.ifBlank { "无标题" }
             runCatching { snap.effectiveContextText() }
                 .onSuccess { text ->
+                    contextExtractedQuestions = if (!snap.isSelectionMode()) {
+                        snap.extractedQuestions.map {
+                            TikuSearchRequest(question = it.question, options = it.options, type = it.type)
+                        }
+                    } else {
+                        emptyList()
+                    }
                     uiState = uiState.copy(
                         domStatus = "已抓取 · $modeLabel",
                         contextMeta = "已附带网页 · $modeLabel · ${text.length} 字 · $titlePart",
@@ -643,7 +659,8 @@ class OverlayService : Service() {
                         val prompt = configStore.load().overlayPrefs.quickAskPrompt
                         sendQuickAction(
                             displayLabel = OverlayPromptBuilder.DEFAULT_EMPTY_DOM_LABEL,
-                            instruction = prompt
+                            instruction = prompt,
+                            allowTikuPresearch = true
                         )
                     }
                 }
@@ -761,6 +778,7 @@ class OverlayService : Service() {
     }
 
     private fun clearContextText() {
+        contextExtractedQuestions = emptyList()
         uiState = uiState.copy(
             contextText = "",
             domStatus = "等待采集",
@@ -785,6 +803,7 @@ class OverlayService : Service() {
             uiState = uiState.copy(warningText = "剪贴板为空，无法导入文本")
             return
         }
+        contextExtractedQuestions = emptyList()
         uiState = uiState.copy(
             contextText = text,
             contextMeta = "已附带剪贴板 · ${text.length} 字",
@@ -793,13 +812,116 @@ class OverlayService : Service() {
         )
     }
 
-    private fun sendQuickAction(displayLabel: String, instruction: String) {
+    private fun searchTikuOnly() {
+        disablePanelImeFocus(hideIme = true)
+        if (uiState.isGenerating) {
+            stopGeneration()
+        }
+        val cfg = configStore.load()
+        val tikuCfg = cfg.tikuConfig
+        if (!tikuCfg.enabled) {
+            uiState = uiState.copy(warningText = "题库功能已关闭，请先在主界面开启")
+            return
+        }
+
+        val input = uiState.draftPrompt.trim()
+        val ctxText = uiState.contextText.trim()
+        val domQuestions = if (ctxText.isNotEmpty()) contextExtractedQuestions else emptyList()
+        val rawSource = ctxText.ifEmpty { input }
+        if (rawSource.isEmpty() && domQuestions.isEmpty()) {
+            uiState = uiState.copy(warningText = "请先点击「读DOM」「剪贴板」或输入题目后再查题库")
+            return
+        }
+
+        val requests = OcsQuestionExtractor.extract(rawSource, domQuestions)
+        if (requests.isEmpty()) {
+            uiState = uiState.copy(warningText = "未提取到可检索的题目内容")
+            return
+        }
+
+        val hasContext = ctxText.isNotEmpty() || domQuestions.isNotEmpty()
+        val visibleUserText = when {
+            hasContext && input.isNotEmpty() -> "查题库 · $input"
+            hasContext -> "查题库"
+            else -> input
+        }
+        val contextBadge = if (hasContext) {
+            OverlayPromptBuilder.quoteBadgeForStatus(uiState.domStatus)
+        } else {
+            ""
+        }
+        val userTurnContent = when {
+            ctxText.isNotEmpty() -> "${input.ifEmpty { "查题库" }}\n\n[页面上下文]\n$ctxText"
+            hasContext -> input.ifEmpty { requests.joinToString("\n") { it.question } }
+            else -> input
+        }
+
+        val userUiMsg = ChatUiMessage(
+            id = nextMsgId++,
+            role = "user",
+            content = visibleUserText,
+            contextBadge = contextBadge,
+            isStreaming = false
+        )
+        val assistantMsgId = nextMsgId++
+        val assistantPlaceholder = ChatUiMessage(
+            id = assistantMsgId,
+            role = "assistant",
+            content = "",
+            reasoning = "正在检索题库...",
+            isStreaming = true
+        )
+
+        conversationHistory.add(ChatTurn(role = "user", content = userTurnContent))
+        if (hasContext) {
+            contextExtractedQuestions = emptyList()
+        }
+        uiState = uiState.copy(
+            contextText = if (hasContext) "" else uiState.contextText,
+            domStatus = if (hasContext) "等待采集" else uiState.domStatus,
+            contextMeta = if (hasContext) "" else uiState.contextMeta,
+            draftPrompt = "",
+            warningText = "",
+            messages = uiState.messages + userUiMsg + assistantPlaceholder,
+            isGenerating = true
+        )
+
+        activeChatJob?.cancel()
+        activeChatJob = scope.launch {
+            runCatching {
+                tikuClient.searchBatch(requests, tikuCfg)
+            }.onSuccess { results ->
+                val formatted = TikuMarkdownFormatter.formatForDisplay(results, tikuCfg.mode.displayName)
+                conversationHistory.add(ChatTurn("assistant", formatted))
+                updateAssistantMessage(assistantMsgId, formatted, "", streaming = false)
+                finishGenerationUiState()
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                val msg = "题库检索失败: ${err.message ?: err.javaClass.simpleName}"
+                updateAssistantMessage(assistantMsgId, msg, "", streaming = false)
+                finishGenerationUiState()
+            }
+        }
+    }
+
+    private fun sendQuickAction(
+        displayLabel: String,
+        instruction: String,
+        allowTikuPresearch: Boolean = displayLabel == "直接解题"
+    ) {
         disablePanelImeFocus(hideIme = true)
         if (uiState.isGenerating) {
             stopGeneration()
         }
         val imgB64 = activeAttachedImageBase64
         val imgPreview = uiState.attachedImage
+        val ctxText = uiState.contextText.trim()
+        val domQuestions = if (ctxText.isNotEmpty()) contextExtractedQuestions else emptyList()
+        val presearchQuestions = if (allowTikuPresearch && (ctxText.isNotEmpty() || domQuestions.isNotEmpty())) {
+            OcsQuestionExtractor.extract(ctxText, domQuestions)
+        } else {
+            emptyList()
+        }
         val built = OverlayPromptBuilder.buildQuickAction(
             displayLabel = displayLabel,
             instruction = instruction,
@@ -818,7 +940,9 @@ class OverlayService : Service() {
             imageBase64Jpeg = imgB64,
             imagePreview = imgPreview,
             clearDraft = false,
-            consumeContext = true
+            consumeContext = true,
+            allowTikuPresearch = allowTikuPresearch,
+            presearchQuestions = presearchQuestions
         )
     }
 
@@ -827,6 +951,15 @@ class OverlayService : Service() {
         val imgB64 = activeAttachedImageBase64
         val imgPreview = uiState.attachedImage
         val quickAskPrompt = configStore.load().overlayPrefs.quickAskPrompt
+        val ctxText = uiState.contextText.trim()
+        val input = uiState.draftPrompt.trim()
+        val domQuestions = if (ctxText.isNotEmpty()) contextExtractedQuestions else emptyList()
+        val presearchSource = ctxText.ifEmpty { input }
+        val presearchQuestions = if (presearchSource.isNotEmpty() || domQuestions.isNotEmpty()) {
+            OcsQuestionExtractor.extract(presearchSource, domQuestions)
+        } else {
+            emptyList()
+        }
         val built = OverlayPromptBuilder.buildManual(
             rawInput = uiState.draftPrompt,
             rawContextText = uiState.contextText,
@@ -845,7 +978,9 @@ class OverlayService : Service() {
             imageBase64Jpeg = imgB64,
             imagePreview = imgPreview,
             clearDraft = true,
-            consumeContext = true
+            consumeContext = true,
+            allowTikuPresearch = true,
+            presearchQuestions = presearchQuestions
         )
     }
 
@@ -896,6 +1031,7 @@ class OverlayService : Service() {
         activeChatJob?.cancel()
         activeChatJob = null
         conversationHistory.clear()
+        contextExtractedQuestions = emptyList()
         clearAttachedImage()
         uiState = uiState.copy(
             messages = emptyList(),
@@ -915,18 +1051,30 @@ class OverlayService : Service() {
         imageBase64Jpeg: String?,
         imagePreview: Bitmap?,
         clearDraft: Boolean,
-        consumeContext: Boolean
+        consumeContext: Boolean,
+        allowTikuPresearch: Boolean = false,
+        presearchQuestions: List<TikuSearchRequest> = emptyList()
     ) {
         val cfg = configStore.load()
         val profile = cfg.activeProfile()
-        runCatching { profile.activeBearerToken() }.onFailure { err ->
-            uiState = uiState.copy(warningText = err.message ?: "请先在主界面配置模型密钥或 OAuth 登录")
-            return
+        val tikuCfg = cfg.tikuConfig
+        val willRunTikuPresearch = allowTikuPresearch &&
+            tikuCfg.enabled &&
+            tikuCfg.autoQueryBeforeAi &&
+            presearchQuestions.isNotEmpty()
+        val canSkipAi = willRunTikuPresearch && tikuCfg.skipAiOnHit
+
+        if (!canSkipAi) {
+            runCatching { profile.activeBearerToken() }.onFailure { err ->
+                uiState = uiState.copy(warningText = err.message ?: "请先在主界面配置模型密钥或 OAuth 登录")
+                return
+            }
         }
 
         if (consumeContext) {
-            // Consume pending cropped attachment after attaching it to this user turn.
+            // Consume pending cropped attachment and DOM questions after attaching them to this turn.
             activeAttachedImageBase64 = null
+            contextExtractedQuestions = emptyList()
         }
         val userUiMsg = ChatUiMessage(
             id = nextMsgId++,
@@ -941,7 +1089,7 @@ class OverlayService : Service() {
             id = assistantMsgId,
             role = "assistant",
             content = "",
-            reasoning = "",
+            reasoning = if (willRunTikuPresearch) "正在预检索题库..." else "",
             isStreaming = true
         )
 
@@ -957,12 +1105,73 @@ class OverlayService : Service() {
             isGenerating = true
         )
 
-        val snapshotHistory = conversationHistory.toList()
+        val baseHistory = conversationHistory.toList()
         val textSb = StringBuilder()
         val reasoningSb = StringBuilder()
 
         activeChatJob?.cancel()
         activeChatJob = scope.launch {
+            var presearchResults: List<TikuSearchResult> = emptyList()
+            if (willRunTikuPresearch) {
+                presearchResults = runCatching {
+                    tikuClient.searchBatch(presearchQuestions, tikuCfg)
+                }.getOrElse { emptyList() }
+
+                if (tikuCfg.skipAiOnHit && presearchResults.isNotEmpty() && presearchResults.all { it.isHit() }) {
+                    val formatted = TikuMarkdownFormatter.formatForDisplay(presearchResults, tikuCfg.mode.displayName)
+                    conversationHistory.add(ChatTurn("assistant", formatted))
+                    updateAssistantMessage(assistantMsgId, formatted, "", streaming = false)
+                    finishGenerationUiState()
+                    return@launch
+                }
+            }
+
+            if (canSkipAi) {
+                val tokenResult = runCatching { profile.activeBearerToken() }
+                if (tokenResult.isFailure) {
+                    val errText = tokenResult.exceptionOrNull()?.message
+                        ?: "请先在主界面配置模型密钥或 OAuth 登录"
+                    val fallbackContent = if (presearchResults.any { it.isHit() }) {
+                        TikuMarkdownFormatter.formatForDisplay(presearchResults, tikuCfg.mode.displayName) +
+                            "\n\n[未调用 AI：$errText]"
+                    } else {
+                        errText
+                    }
+                    updateAssistantMessage(assistantMsgId, fallbackContent, "", streaming = false)
+                    finishGenerationUiState()
+                    return@launch
+                }
+            }
+
+            val snapshotHistory = if (presearchResults.any { it.isHit() } && baseHistory.isNotEmpty()) {
+                val hitCount = presearchResults.count { it.isHit() }
+                reasoningSb.append("题库命中 ")
+                    .append(hitCount)
+                    .append('/')
+                    .append(presearchResults.size)
+                    .append(" 题，交由 AI 核验解析。\n")
+                updateAssistantMessage(assistantMsgId, "", reasoningSb.toString(), streaming = true)
+
+                val aiContext = TikuMarkdownFormatter.formatForAiContext(presearchResults)
+                val lastIdx = baseHistory.lastIndex
+                val lastTurn = baseHistory[lastIdx]
+                val enrichedContent = buildString {
+                    if (lastTurn.content.isNotBlank()) {
+                        append(lastTurn.content)
+                        append("\n\n")
+                    }
+                    append(aiContext)
+                }
+                baseHistory.toMutableList().apply {
+                    this[lastIdx] = lastTurn.copy(content = enrichedContent)
+                }
+            } else {
+                if (willRunTikuPresearch) {
+                    updateAssistantMessage(assistantMsgId, "", "", streaming = true)
+                }
+                baseHistory
+            }
+
             runCatching {
                 openAiClient.streamChat(
                     profile = profile,
@@ -996,22 +1205,23 @@ class OverlayService : Service() {
                     }
                     updateAssistantMessage(assistantMsgId, finalContent, finalReasoning, streaming = false)
                 }
-                uiState = uiState.copy(
-                    isGenerating = false,
-                    ballHasUnreadReply = !isExpanded
-                )
-                scheduleIdleRetract()
+                finishGenerationUiState()
             }.onFailure { err ->
+                if (err is CancellationException) throw err
                 val msg = "请求失败: ${err.message ?: err.javaClass.simpleName}"
                 val combined = if (textSb.isEmpty()) msg else "${textSb}\n\n[$msg]"
                 updateAssistantMessage(assistantMsgId, combined, reasoningSb.toString(), streaming = false)
-                uiState = uiState.copy(
-                    isGenerating = false,
-                    ballHasUnreadReply = !isExpanded
-                )
-                scheduleIdleRetract()
+                finishGenerationUiState()
             }
         }
+    }
+
+    private fun finishGenerationUiState() {
+        uiState = uiState.copy(
+            isGenerating = false,
+            ballHasUnreadReply = !isExpanded
+        )
+        scheduleIdleRetract()
     }
 
     private fun updateAssistantMessage(

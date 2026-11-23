@@ -55,6 +55,11 @@ import com.scluzlep.searchcx.net.OAuthCallbackForegroundService
 import com.scluzlep.searchcx.net.OpenAiClient
 import com.scluzlep.searchcx.net.PkceOAuthManager
 import com.scluzlep.searchcx.overlay.OverlayService
+import com.scluzlep.searchcx.tiku.TikuAdapterClient
+import com.scluzlep.searchcx.tiku.TikuConfig
+import com.scluzlep.searchcx.tiku.TikuMode
+import com.scluzlep.searchcx.tiku.TikuProvider
+import com.scluzlep.searchcx.tiku.TikuProviderTokens
 import com.scluzlep.searchcx.xposed.ModuleStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -74,6 +79,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var configStore: AppConfigStore
     private val openAiClient = OpenAiClient()
+    private val tikuClient = TikuAdapterClient()
     private val oauthManager = PkceOAuthManager()
     private var codexLoginJob: Job? = null
 
@@ -98,6 +104,18 @@ class MainActivity : ComponentActivity() {
     private var editOAuthScopes by mutableStateOf("openid profile offline_access")
     private var editSystemPrompt by mutableStateOf("")
     private var editQuickPrompt by mutableStateOf("")
+
+    // Editable draft fields synced with config.tikuConfig
+    private var editTikuEnabled by mutableStateOf(true)
+    private var editTikuMode by mutableStateOf(TikuMode.DIRECT_BUILTIN)
+    private var editTikuRemoteUrl by mutableStateOf(TikuConfig.DEFAULT_REMOTE_URL)
+    private var editTikuAutoQuery by mutableStateOf(true)
+    private var editTikuSkipAiOnHit by mutableStateOf(false)
+    private var editTikuProviders by mutableStateOf(TikuProvider.defaultFreeIds())
+    private var editTikuTokens by mutableStateOf(TikuProviderTokens())
+    private var showIcodefTokenField by mutableStateOf(false)
+    private var tikuStatusMessage by mutableStateOf("")
+    private var tikuStatusColor by mutableStateOf(COLOR_INFO)
 
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -549,6 +567,189 @@ class MainActivity : ComponentActivity() {
                         }
 
                         SmallTitle(
+                            text = "题库配置",
+                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            insideMargin = PaddingValues(16.dp)
+                        ) {
+                            PrefToggleRow(
+                                label = "启用 tikuAdapter 题库",
+                                checked = editTikuEnabled,
+                                onToggle = { editTikuEnabled = !editTikuEnabled }
+                            )
+
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "接入方式",
+                                fontSize = 12.sp,
+                                color = Color(0xFF6B7280)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    TikuMode.DIRECT_BUILTIN to "内置聚合",
+                                    TikuMode.REMOTE_ADAPTER to "远端服务"
+                                ).forEach { (mode, label) ->
+                                    SelectableChip(
+                                        label = label,
+                                        selected = editTikuMode == mode,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { editTikuMode = mode }
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = if (editTikuMode == TikuMode.DIRECT_BUILTIN) {
+                                    "直连题库接口完成规范化与投票，无需部署服务端"
+                                } else {
+                                    "连接自建 tikuAdapter 服务，支持本地库与不挂科"
+                                },
+                                fontSize = 11.sp,
+                                color = Color(0xFF6B7280)
+                            )
+
+                            if (editTikuMode == TikuMode.REMOTE_ADAPTER) {
+                                Spacer(Modifier.height(10.dp))
+                                TextField(
+                                    value = editTikuRemoteUrl,
+                                    onValueChange = { editTikuRemoteUrl = it },
+                                    label = "远端服务地址",
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            Spacer(Modifier.height(6.dp))
+                            PrefToggleRow(
+                                label = "提问时先查题库",
+                                checked = editTikuAutoQuery,
+                                onToggle = { editTikuAutoQuery = !editTikuAutoQuery }
+                            )
+                            PrefToggleRow(
+                                label = "全命中时跳过 AI",
+                                checked = editTikuSkipAiOnHit,
+                                onToggle = { editTikuSkipAiOnHit = !editTikuSkipAiOnHit }
+                            )
+
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "免费题库源",
+                                fontSize = 12.sp,
+                                color = Color(0xFF4B5563),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            val visibleFreeProviders = TikuProvider.freeProviders().filter {
+                                editTikuMode == TikuMode.REMOTE_ADAPTER || !it.remoteOnly
+                            }
+                            TikuProviderChipRow(
+                                providers = visibleFreeProviders,
+                                selectedIds = editTikuProviders,
+                                onToggle = { id -> toggleTikuProvider(id) }
+                            )
+
+                            if (TikuProvider.ICODEF.id in editTikuProviders) {
+                                val icodefExpanded = showIcodefTokenField || editTikuTokens.icodefToken.isNotBlank()
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = if (icodefExpanded) "icodef Token · 选填 收起" else "icodef Token · 选填",
+                                    fontSize = 11.sp,
+                                    color = COLOR_INFO,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.clickable {
+                                        showIcodefTokenField = !icodefExpanded
+                                    }
+                                )
+                                if (icodefExpanded) {
+                                    Spacer(Modifier.height(6.dp))
+                                    TextField(
+                                        value = editTikuTokens.icodefToken,
+                                        onValueChange = {
+                                            editTikuTokens = editTikuTokens.withToken(TikuProvider.ICODEF, it)
+                                        },
+                                        label = "icodef Token",
+                                        singleLine = true,
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = "收费题库源",
+                                fontSize = 12.sp,
+                                color = Color(0xFF4B5563),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "默认关闭，按需开启并填写对应 Token",
+                                fontSize = 11.sp,
+                                color = Color(0xFF6B7280)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            TikuProviderChipRow(
+                                providers = TikuProvider.paidProviders(),
+                                selectedIds = editTikuProviders,
+                                onToggle = { id -> toggleTikuProvider(id) }
+                            )
+
+                            val enabledPaidProviders = TikuProvider.paidProviders().filter {
+                                it.id in editTikuProviders
+                            }
+                            if (enabledPaidProviders.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    enabledPaidProviders.forEach { provider ->
+                                        TextField(
+                                            value = editTikuTokens.tokenFor(provider),
+                                            onValueChange = {
+                                                editTikuTokens = editTikuTokens.withToken(provider, it)
+                                            },
+                                            label = "${provider.displayName} Token",
+                                            singleLine = true,
+                                            visualTransformation = PasswordVisualTransformation(),
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(12.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(
+                                    text = "保存题库",
+                                    onClick = { saveTikuConfigToStore() },
+                                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    text = "测试题库",
+                                    onClick = { testTikuConnection() },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (tikuStatusMessage.isNotBlank()) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = tikuStatusMessage,
+                                    color = tikuStatusColor,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+
+                        SmallTitle(
                             text = "系统提示词与保存",
                             insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                         )
@@ -635,6 +836,38 @@ class MainActivity : ComponentActivity() {
         val loaded = configStore.load()
         config = loaded
         loadProfileIntoDraft(loaded.activeProfile(), loaded)
+        loadTikuIntoDraft(loaded.tikuConfig)
+    }
+
+    private fun loadTikuIntoDraft(tiku: TikuConfig) {
+        editTikuEnabled = tiku.enabled
+        editTikuMode = tiku.mode
+        editTikuRemoteUrl = tiku.remoteBaseUrl
+        editTikuAutoQuery = tiku.autoQueryBeforeAi
+        editTikuSkipAiOnHit = tiku.skipAiOnHit
+        editTikuProviders = tiku.enabledProviders
+        editTikuTokens = tiku.tokens
+        showIcodefTokenField = tiku.tokens.icodefToken.isNotBlank()
+    }
+
+    private fun toggleTikuProvider(providerId: String) {
+        editTikuProviders = if (providerId in editTikuProviders) {
+            editTikuProviders - providerId
+        } else {
+            editTikuProviders + providerId
+        }
+    }
+
+    private fun buildTikuConfigFromDraft(): TikuConfig {
+        return TikuConfig(
+            enabled = editTikuEnabled,
+            mode = editTikuMode,
+            remoteBaseUrl = editTikuRemoteUrl.trim().ifEmpty { TikuConfig.DEFAULT_REMOTE_URL },
+            autoQueryBeforeAi = editTikuAutoQuery,
+            skipAiOnHit = editTikuSkipAiOnHit,
+            enabledProviders = editTikuProviders,
+            tokens = editTikuTokens
+        )
     }
 
     private fun loadProfileIntoDraft(p: ProviderProfile, cfg: AppConfig) {
@@ -674,7 +907,8 @@ class MainActivity : ComponentActivity() {
         return fresh.copy(
             activeProfileId = updatedProfile.id,
             systemPrompt = editSystemPrompt.trim(),
-            overlayPrefs = config.overlayPrefs.copy(quickAskPrompt = editQuickPrompt.trim())
+            overlayPrefs = config.overlayPrefs.copy(quickAskPrompt = editQuickPrompt.trim()),
+            tikuConfig = buildTikuConfigFromDraft()
         ).withUpdatedProfile(updatedProfile)
     }
 
@@ -685,6 +919,26 @@ class MainActivity : ComponentActivity() {
         notifyOverlayRefresh()
         setStatus("配置已保存", COLOR_SUCCESS)
         return updated
+    }
+
+    private fun saveTikuConfigToStore(): AppConfig {
+        val updated = buildConfigWithDraft()
+        configStore.save(updated)
+        config = updated
+        notifyOverlayRefresh()
+        setTikuStatus("题库配置已保存", COLOR_SUCCESS)
+        return updated
+    }
+
+    private fun testTikuConnection() {
+        val cfg = saveTikuConfigToStore()
+        val tikuCfg = cfg.tikuConfig
+        setTikuStatus("正在测试题库 (${tikuCfg.mode.displayName})...", COLOR_INFO)
+        lifecycleScope.launch {
+            tikuClient.testConnection(tikuCfg)
+                .onSuccess { msg -> setTikuStatus(msg, COLOR_SUCCESS) }
+                .onFailure { err -> setTikuStatus("题库测试失败: ${err.message}", COLOR_ERROR) }
+        }
     }
 
     private fun updateOverlayPrefs(transform: OverlayPrefs.(OverlayPrefs) -> OverlayPrefs) {
@@ -1052,6 +1306,11 @@ class MainActivity : ComponentActivity() {
         statusColor = color
     }
 
+    private fun setTikuStatus(message: String, color: Color) {
+        tikuStatusMessage = message
+        tikuStatusColor = color
+    }
+
     companion object {
         private val COLOR_INFO = Color(0xFF3482FF)
         private val COLOR_SUCCESS = Color(0xFF15803D)
@@ -1091,6 +1350,28 @@ private fun PrefToggleRow(
                 color = if (checked) Color.White else Color(0xFF4B5563),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+private fun TikuProviderChipRow(
+    providers: List<TikuProvider>,
+    selectedIds: Set<String>,
+    onToggle: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        providers.forEach { provider ->
+            SelectableChip(
+                label = provider.displayName,
+                selected = provider.id in selectedIds,
+                onClick = { onToggle(provider.id) }
             )
         }
     }

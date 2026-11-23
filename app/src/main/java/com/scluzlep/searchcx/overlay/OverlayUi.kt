@@ -323,6 +323,7 @@ fun FloatingPanelComposable(
     onCollapse: () -> Unit,
     onClearContext: () -> Unit,
     onRemoveAttachedImage: () -> Unit,
+    onSearchTikuOnly: () -> Unit,
     onQuickAction: (displayLabel: String, instruction: String) -> Unit,
     onDraftChange: (String) -> Unit,
     onSendOrStop: () -> Unit,
@@ -594,6 +595,9 @@ fun FloatingPanelComposable(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    QuickChip("查题库") {
+                        onSearchTikuOnly()
+                    }
                     QuickChip("直接解题") {
                         onQuickAction("直接解题", "请直接解答以下题目或问题，给出关键推导步骤与最终结论：")
                     }
