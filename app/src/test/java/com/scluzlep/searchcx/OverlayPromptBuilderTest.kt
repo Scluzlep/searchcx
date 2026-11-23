@@ -23,7 +23,7 @@ class OverlayPromptBuilderTest {
         built!!
         assertEquals("这道题选哪个？", built.visibleUserText)
         assertFalse(built.visibleUserText.contains(rawDom))
-        assertEquals("已附带网页", built.contextBadge)
+        assertEquals("DOM HTML", built.contextBadge)
         assertEquals("这道题选哪个？\n\n[页面上下文]\n$rawDom", built.apiPrompt)
     }
 
@@ -42,7 +42,7 @@ class OverlayPromptBuilderTest {
         built!!
         assertEquals("解析网页内容", built.visibleUserText)
         assertFalse(built.visibleUserText.contains(rawDom))
-        assertEquals("已附带网页", built.contextBadge)
+        assertEquals("DOM HTML", built.contextBadge)
         assertEquals("$quickPrompt\n\n[页面上下文]\n$rawDom", built.apiPrompt)
     }
 
@@ -67,7 +67,7 @@ class OverlayPromptBuilderTest {
             built!!
             assertEquals(label, built.visibleUserText)
             assertFalse(built.visibleUserText.contains(rawDom))
-            assertEquals("已附带网页", built.contextBadge)
+            assertEquals("DOM HTML", built.contextBadge)
             assertEquals("$instruction\n\n[页面上下文]\n$rawDom", built.apiPrompt)
         }
 
@@ -81,8 +81,37 @@ class OverlayPromptBuilderTest {
         rawOnly!!
         assertEquals("仅发原文", rawOnly.visibleUserText)
         assertFalse(rawOnly.visibleUserText.contains(rawDom))
-        assertEquals("已附带网页", rawOnly.contextBadge)
+        assertEquals("DOM HTML", rawOnly.contextBadge)
         assertEquals(rawDom, rawOnly.apiPrompt)
+    }
+
+    @Test
+    fun clipboardContextUsesClipboardQuoteLabelWhileDomUsesDomHtml() {
+        assertEquals("剪贴板文本", OverlayPromptBuilder.quoteBadgeForStatus("已粘贴"))
+        assertEquals("DOM HTML", OverlayPromptBuilder.quoteBadgeForStatus("已抓取 · 正文"))
+        assertEquals("DOM HTML", OverlayPromptBuilder.quoteBadgeForStatus("等待采集"))
+
+        val clipText = "剪贴板里的题干内容"
+        val manualClip = OverlayPromptBuilder.buildManual(
+            rawInput = "帮我检查",
+            rawContextText = clipText,
+            hasImage = false,
+            contextLabel = OverlayPromptBuilder.quoteBadgeForStatus("已粘贴")
+        )!!
+        assertEquals("帮我检查", manualClip.visibleUserText)
+        assertEquals("剪贴板文本", manualClip.contextBadge)
+        assertEquals("帮我检查\n\n[页面上下文]\n$clipText", manualClip.apiPrompt)
+
+        val quickClip = OverlayPromptBuilder.buildQuickAction(
+            displayLabel = "总结要点",
+            instruction = "请总结：",
+            rawContextText = clipText,
+            hasImage = false,
+            contextLabel = OverlayPromptBuilder.quoteBadgeForStatus("已粘贴")
+        )!!
+        assertEquals("总结要点", quickClip.visibleUserText)
+        assertEquals("剪贴板文本", quickClip.contextBadge)
+        assertEquals("请总结：\n\n[页面上下文]\n$clipText", quickClip.apiPrompt)
     }
 
     @Test
@@ -138,7 +167,7 @@ class OverlayPromptBuilderTest {
             hasImage = false
         )!!
         assertEquals("解释一下公式含义", turn1.visibleUserText)
-        assertEquals("已附带网页", turn1.contextBadge)
+        assertEquals("DOM HTML", turn1.contextBadge)
         assertTrue(turn1.apiPrompt.contains(domTurn1))
         assertFalse(turn1.visibleUserText.contains(domTurn1))
 
@@ -158,7 +187,7 @@ class OverlayPromptBuilderTest {
             hasImage = false
         )!!
         assertEquals("再结合这页讲讲", turn3.visibleUserText)
-        assertEquals("已附带网页", turn3.contextBadge)
+        assertEquals("DOM HTML", turn3.contextBadge)
         assertEquals("再结合这页讲讲\n\n[页面上下文]\n$domTurn3", turn3.apiPrompt)
         assertFalse(turn3.visibleUserText.contains(domTurn3))
 
@@ -169,7 +198,7 @@ class OverlayPromptBuilderTest {
             quickAskPrompt = "请解析："
         )!!
         assertEquals("解析网页内容", turn4EmptyInput.visibleUserText)
-        assertEquals("已附带网页", turn4EmptyInput.contextBadge)
+        assertEquals("DOM HTML", turn4EmptyInput.contextBadge)
         assertEquals("请解析：\n\n[页面上下文]\n$domTurn3", turn4EmptyInput.apiPrompt)
         assertFalse(turn4EmptyInput.visibleUserText.contains(domTurn3))
     }

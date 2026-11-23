@@ -17,8 +17,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -59,6 +61,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -87,25 +90,31 @@ data class BuiltPrompt(
  * from the full API prompt containing raw page DOM context.
  */
 object OverlayPromptBuilder {
-    const val CONTEXT_BADGE_WEB = "已附带网页"
+    const val CONTEXT_BADGE_DOM = "DOM HTML"
+    const val CONTEXT_BADGE_CLIPBOARD = "剪贴板文本"
     const val DEFAULT_EMPTY_DOM_LABEL = "解析网页内容"
     const val DEFAULT_IMAGE_ONLY_LABEL = "解析截图内容"
     const val DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
+
+    fun quoteBadgeForStatus(domStatus: String): String =
+        if (domStatus == "已粘贴") CONTEXT_BADGE_CLIPBOARD else CONTEXT_BADGE_DOM
 
     fun buildManual(
         rawInput: String,
         rawContextText: String,
         hasImage: Boolean,
-        quickAskPrompt: String = DEFAULT_QUICK_ASK_PROMPT
+        quickAskPrompt: String = DEFAULT_QUICK_ASK_PROMPT,
+        contextLabel: String = CONTEXT_BADGE_DOM
     ): BuiltPrompt? {
         val input = rawInput.trim()
         val ctxText = rawContextText.trim()
         val askPrompt = quickAskPrompt.trim().ifEmpty { DEFAULT_QUICK_ASK_PROMPT }
+        val badge = contextLabel.trim().ifEmpty { CONTEXT_BADGE_DOM }
 
         return when {
             input.isNotEmpty() && ctxText.isNotEmpty() -> BuiltPrompt(
                 visibleUserText = input,
-                contextBadge = CONTEXT_BADGE_WEB,
+                contextBadge = badge,
                 apiPrompt = "$input\n\n[页面上下文]\n$ctxText"
             )
             input.isNotEmpty() -> BuiltPrompt(
@@ -115,7 +124,7 @@ object OverlayPromptBuilder {
             )
             ctxText.isNotEmpty() -> BuiltPrompt(
                 visibleUserText = DEFAULT_EMPTY_DOM_LABEL,
-                contextBadge = CONTEXT_BADGE_WEB,
+                contextBadge = badge,
                 apiPrompt = "$askPrompt\n\n[页面上下文]\n$ctxText"
             )
             hasImage -> BuiltPrompt(
@@ -131,7 +140,8 @@ object OverlayPromptBuilder {
         displayLabel: String,
         instruction: String,
         rawContextText: String,
-        hasImage: Boolean
+        hasImage: Boolean,
+        contextLabel: String = CONTEXT_BADGE_DOM
     ): BuiltPrompt? {
         val ctxText = rawContextText.trim()
         if (ctxText.isEmpty() && !hasImage) return null
@@ -145,9 +155,14 @@ object OverlayPromptBuilder {
             instr.isNotEmpty() -> instr
             else -> ctxText
         }
+        val badge = if (ctxText.isNotEmpty()) {
+            contextLabel.trim().ifEmpty { CONTEXT_BADGE_DOM }
+        } else {
+            ""
+        }
         return BuiltPrompt(
             visibleUserText = label,
-            contextBadge = if (ctxText.isNotEmpty()) CONTEXT_BADGE_WEB else "",
+            contextBadge = badge,
             apiPrompt = apiPrompt
         )
     }
@@ -511,31 +526,16 @@ fun FloatingPanelComposable(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (state.contextText.isNotBlank()) {
-                    val chipText = state.contextMeta.ifBlank {
-                        "已附带网页 · ${state.contextText.length} 字"
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(ACCENT_SOFT)
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        BasicText(
-                            text = chipText,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = TextStyle(
-                                color = ACCENT_BLUE,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            ),
-                            modifier = Modifier.weight(1f)
-                        )
-                        CompactRemoveButton(onClick = onClearContext)
-                    }
+                    val quoteLabel = OverlayPromptBuilder.quoteBadgeForStatus(state.domStatus)
+                    QuoteReferenceBlock(
+                        label = quoteLabel,
+                        containerBg = ACCENT_SOFT,
+                        barColor = ACCENT_BLUE,
+                        barWidth = 3.dp,
+                        textColor = ACCENT_BLUE,
+                        verticalPadding = 4.dp,
+                        trailing = { CompactRemoveButton(onClick = onClearContext) }
+                    )
                 }
 
                 if (state.warningText.isNotBlank()) {
@@ -652,6 +652,16 @@ fun FloatingPanelComposable(
                                 .padding(horizontal = 12.dp, vertical = 9.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            if (isUser && msg.contextBadge.isNotBlank()) {
+                                QuoteReferenceBlock(
+                                    label = msg.contextBadge,
+                                    containerBg = Color(0x29FFFFFF),
+                                    barColor = Color.White,
+                                    barWidth = 2.5.dp,
+                                    textColor = Color.White,
+                                    verticalPadding = 5.dp
+                                )
+                            }
                             if (msg.imagePreview != null) {
                                 val bmp = msg.imagePreview
                                 val img = remember(bmp) { bmp.asImageBitmap() }
@@ -670,23 +680,6 @@ fun FloatingPanelComposable(
                                     text = msg.content.ifBlank { "[仅发送图片]" },
                                     style = TextStyle(color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
                                 )
-                                if (msg.contextBadge.isNotBlank()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0x2EFFFFFF))
-                                            .padding(horizontal = 7.dp, vertical = 2.dp)
-                                    ) {
-                                        BasicText(
-                                            text = msg.contextBadge,
-                                            style = TextStyle(
-                                                color = Color(0xF2FFFFFF),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        )
-                                    }
-                                }
                             } else {
                                 MarkdownMessageView(
                                     rawText = msg.content,
@@ -801,6 +794,56 @@ private fun SmallHeaderIconButton(
             text = label,
             style = TextStyle(color = TEXT_PRIMARY, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         )
+    }
+}
+
+@Composable
+private fun QuoteReferenceBlock(
+    label: String,
+    containerBg: Color,
+    barColor: Color,
+    barWidth: Dp,
+    textColor: Color,
+    verticalPadding: Dp,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(containerBg)
+            .padding(horizontal = 8.dp, vertical = verticalPadding),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(IntrinsicSize.Min),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(barWidth)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(barColor)
+            )
+            BasicText(
+                text = label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(
+                    color = textColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            )
+        }
+        if (trailing != null) {
+            trailing()
+        }
     }
 }
 

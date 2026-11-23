@@ -804,7 +804,8 @@ class OverlayService : Service() {
             displayLabel = displayLabel,
             instruction = instruction,
             rawContextText = uiState.contextText,
-            hasImage = !imgB64.isNullOrBlank()
+            hasImage = !imgB64.isNullOrBlank(),
+            contextLabel = OverlayPromptBuilder.quoteBadgeForStatus(uiState.domStatus)
         )
         if (built == null) {
             uiState = uiState.copy(warningText = "请先点击「读DOM」「截屏框选」或「剪贴板」获取内容")
@@ -830,7 +831,8 @@ class OverlayService : Service() {
             rawInput = uiState.draftPrompt,
             rawContextText = uiState.contextText,
             hasImage = !imgB64.isNullOrBlank(),
-            quickAskPrompt = quickAskPrompt
+            quickAskPrompt = quickAskPrompt,
+            contextLabel = OverlayPromptBuilder.quoteBadgeForStatus(uiState.domStatus)
         )
         if (built == null) {
             uiState = uiState.copy(warningText = "请输入问题，或先读取网页 DOM / 截屏框选")
