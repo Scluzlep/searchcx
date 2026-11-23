@@ -7,7 +7,7 @@
 - **读 DOM**：基于 `io.github.libxposed:api:102.0.0` 与 `service:102.0.0`，通过 `META-INF/xposed/module.prop` 与 `java_init.list` 注册 `WebViewDomModule`，支持原生 `WebView` 与 TBS/X5 只读文本提取及热重载。
 - **截屏框选**：通过 Android `MediaProjection` 单帧截图与自由框选裁剪图像，直接发送给多模态 AI，不回写或修改原网页。
 - **悬浮窗**：收起样式可在主页固定为无文字圆形按钮或白色带阴影小点；支持贴边半隐、轻点展开、长按抓取提问、模型切换、高度切换、透明度调节与 Markdown/公式渲染。
-- **题库检索（tikuAdapter）**：支持「内置聚合」与「远端服务」双模式。默认仅启用免费题库源（内置默认 `icodef`，远端服务可选 `local`、`buguake`）；收费题库源（言溪、题库海、万能、爱点、柠檬）默认关闭，按需勾选并填写对应 Token 后使用 AndroidKeyStore 加密保存。悬浮窗支持独立「查题库」以及「提问时先查题库」和「全命中时跳过 AI」。
+- **题库检索（tikuAdapter）**：支持「内置聚合」与「远端服务」双模式。默认仅启用免费题库源（内置默认 `icodef`、`buguake`（不挂科），远端服务另可使用 `local`）；收费题库源（言溪、题库海、万能、爱点、柠檬）默认关闭，按需勾选并填写对应 Token 后使用 AndroidKeyStore 加密保存。悬浮窗支持独立「查题库」以及「提问时先查题库」和「全命中时跳过 AI」。
 - **多服务商与 Codex OAuth**：支持 OpenAI Chat、OpenAI Responses、ChatGPT Codex OAuth PKCE 与自定义 OAuth PKCE；凭据仅保存在本进程 AndroidKeyStore。
 
 ## 本地构建

@@ -606,9 +606,9 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(6.dp))
                             Text(
                                 text = if (editTikuMode == TikuMode.DIRECT_BUILTIN) {
-                                    "直连题库接口完成规范化与投票，无需部署服务端"
+                                    "直连 icodef、不挂科等题库，聚合结果无需服务端"
                                 } else {
-                                    "连接自建 tikuAdapter 服务，支持本地库与不挂科"
+                                    "连接自建 tikuAdapter 服务，支持本地题库"
                                 },
                                 fontSize = 11.sp,
                                 color = Color(0xFF6B7280)

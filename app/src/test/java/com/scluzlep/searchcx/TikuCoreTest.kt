@@ -54,7 +54,7 @@ class TikuCoreTest {
         val cfg = TikuConfig(tokens = tokens)
 
         assertEquals(freeIds, cfg.enabledProviders)
-        assertEquals(listOf(TikuProvider.ICODEF), cfg.effectiveDirectProviders())
+        assertEquals(listOf(TikuProvider.ICODEF, TikuProvider.BUGUAKE), cfg.effectiveDirectProviders())
         assertEquals(
             listOf(TikuProvider.ICODEF, TikuProvider.LOCAL, TikuProvider.BUGUAKE),
             cfg.effectiveRemoteProviders()
@@ -90,7 +90,7 @@ class TikuCoreTest {
             .withProviderToggled("tikuhai", true)
             .withProviderToggled("lemon", true)
         assertEquals(
-            listOf(TikuProvider.ICODEF, TikuProvider.ENNCY, TikuProvider.TIKUHAI, TikuProvider.LEMON),
+            listOf(TikuProvider.ICODEF, TikuProvider.BUGUAKE, TikuProvider.ENNCY, TikuProvider.TIKUHAI, TikuProvider.LEMON),
             cfg.effectiveDirectProviders()
         )
 
@@ -111,7 +111,7 @@ class TikuCoreTest {
             .withProviderToggled("wanneng", true)
             .withProviderToggled("aidian", true)
         assertEquals(
-            listOf(TikuProvider.ICODEF, TikuProvider.TIKUHAI, TikuProvider.WANNENG, TikuProvider.AIDIAN),
+            listOf(TikuProvider.ICODEF, TikuProvider.BUGUAKE, TikuProvider.TIKUHAI, TikuProvider.WANNENG, TikuProvider.AIDIAN),
             noTokenPaid.effectiveDirectProviders()
         )
     }
@@ -283,7 +283,7 @@ class TikuCoreTest {
     }
 
     @Test
-    fun directModeCallsOnlyFreeIcodefByDefaultAndRespectsAllSixWhenEnabled() = runBlocking {
+    fun directModeCallsFreeIcodefAndBuguakeByDefaultAndRespectsAllSevenWhenEnabled() = runBlocking {
         val capturedUrls = CopyOnWriteArrayList<String>()
         val clientFreeOnly = TikuAdapterClient(mockOkHttp { req ->
             capturedUrls.add(req.url.toString())
@@ -308,9 +308,13 @@ class TikuCoreTest {
         assertTrue(freeRes.isHit())
         assertEquals(listOf("B"), freeRes.answerKey)
         assertEquals(listOf("icodef"), freeRes.matchedProviders)
-        assertEquals(listOf("https://cx.icodef.com/wyn-nb?v=4"), capturedUrls.toList())
+        assertEquals(
+            setOf("https://cx.icodef.com/wyn-nb?v=4",
+                "https://easylearn.baidu.com/edu-web-go/bgk/searchlist?query=%E4%B8%AD%E5%9B%BD%E7%9A%84%E9%A6%96%E9%83%BD%E6%98%AF%EF%BC%9F&rn=10&pn=0"),
+            capturedUrls.toSet()
+        )
 
-        // Now enable all 8 providers (6 direct + 2 remote-only local/buguake).
+        // Now enable all 8 providers (7 direct + 1 remote-only local).
         val recordedRequests = CopyOnWriteArrayList<CapturedHttp>()
         val allClient = TikuAdapterClient(mockOkHttp { httpReq ->
             val bodyStr = readBodyString(httpReq)
@@ -319,6 +323,8 @@ class TikuCoreTest {
             when {
                 url.startsWith("https://cx.icodef.com/wyn-nb") ->
                     jsonResponse(httpReq, """{"code":1,"data":"北京"}""")
+                url.startsWith("https://easylearn.baidu.com/edu-web-go/bgk/searchlist") ->
+                    jsonResponse(httpReq, """{"data":{"list":[]}}""")
                 url.startsWith("http://lyck6.cn/scriptService/api/autoAnswer/1234567890") ->
                     jsonResponse(httpReq, """{"code":0,"result":{"success":true,"answers":[["北京"]]}}""")
                 url.startsWith("https://api.tikuhai.com/search") ->
@@ -340,7 +346,7 @@ class TikuCoreTest {
         val allRes = allClient.searchOne(req, allEnabledCfg)
         assertTrue(allRes.isHit())
         assertEquals("B", allRes.answerKeyText)
-        assertEquals(6, recordedRequests.size)
+        assertEquals(7, recordedRequests.size)
 
         // Verify per-provider wire protocol details.
         val byHost = recordedRequests.associateBy { it.request.url.host }
@@ -468,6 +474,8 @@ class TikuCoreTest {
                     jsonResponse(req, """{"qlist":[{"answer":"答案一"}]}""")
                 url == "https://cx.icodef.com/wyn-nb?v=4" ->
                     jsonResponse(req, """{"error":"upstream"}""", code = 500)
+                url.startsWith("https://easylearn.baidu.com/edu-web-go/bgk/searchlist") ->
+                    jsonResponse(req, """{"data":{"list":[]}}""")
                 else -> error("Unexpected URL: $url")
             }
         })

@@ -32,7 +32,7 @@ enum class TikuProvider(
 ) {
     ICODEF("icodef", "icodef", "icodefToken", true, false, false),
     LOCAL("local", "本地库", null, true, true, false),
-    BUGUAKE("buguake", "不挂科", null, true, true, false),
+    BUGUAKE("buguake", "不挂科", null, true, false, false),
     ENNCY("enncy", "言溪", "enncyToken", false, false, true),
     TIKUHAI("tikuhai", "题库海", "tikuhaiToken", false, false, false),
     WANNENG("wanneng", "万能", "wannengToken", false, false, false),

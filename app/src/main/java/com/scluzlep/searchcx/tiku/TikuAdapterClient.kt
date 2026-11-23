@@ -300,7 +300,7 @@ class TikuAdapterClient(
         req: TikuSearchRequest,
         token: String
     ): List<String> {
-        // LOCAL and BUGUAKE are strictly remoteOnly and never executed locally.
+        // The local database is available only through a remote adapter.
         if (provider.remoteOnly) return emptyList()
         val httpReq = buildDirectProviderRequest(provider, req, token) ?: return emptyList()
         val httpResp = executeCall(httpReq)
@@ -309,7 +309,7 @@ class TikuAdapterClient(
         }
         val body = httpResp.body.trim()
         if (body.isEmpty()) return emptyList()
-        return parseDirectProviderResponse(provider, body)
+        return parseDirectProviderResponse(provider, body, req)
     }
 
     private fun buildDirectProviderRequest(
@@ -318,7 +318,15 @@ class TikuAdapterClient(
         token: String
     ): Request? {
         return when (provider) {
-            TikuProvider.LOCAL, TikuProvider.BUGUAKE -> null
+            TikuProvider.LOCAL -> null
+            TikuProvider.BUGUAKE -> {
+                val url = URL_BUGUAKE.toHttpUrl().newBuilder()
+                    .addQueryParameter("query", req.question)
+                    .addQueryParameter("rn", "10")
+                    .addQueryParameter("pn", "0")
+                    .build()
+                Request.Builder().url(url).get().build()
+            }
             TikuProvider.ICODEF -> {
                 val form = FormBody.Builder()
                     .add("question", req.question)
@@ -403,10 +411,11 @@ class TikuAdapterClient(
         }
     }
 
-    private fun parseDirectProviderResponse(provider: TikuProvider, body: String): List<String> {
+    private fun parseDirectProviderResponse(provider: TikuProvider, body: String, req: TikuSearchRequest): List<String> {
         val root = JSONObject(body)
         return when (provider) {
-            TikuProvider.LOCAL, TikuProvider.BUGUAKE -> emptyList()
+            TikuProvider.LOCAL -> emptyList()
+            TikuProvider.BUGUAKE -> BuguakeParser.parse(req.question, root)
             TikuProvider.ICODEF -> {
                 if (root.optInt("code", -1) != 1 || root.isNull("data")) return emptyList()
                 splitHashAnswers(root.optString("data", ""))
@@ -579,6 +588,7 @@ class TikuAdapterClient(
         private const val BATCH_CONCURRENCY = 3
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
+        private const val URL_BUGUAKE = "https://easylearn.baidu.com/edu-web-go/bgk/searchlist"
         private const val URL_ICODEF = "https://cx.icodef.com/wyn-nb?v=4"
         private const val URL_WANNENG_TOKEN_PREFIX = "http://lyck6.cn/scriptService/api/autoAnswer/"
         private const val URL_WANNENG_FREE = "http://lyck6.cn/scriptService/api/autoFreeAnswer"
