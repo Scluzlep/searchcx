@@ -68,4 +68,46 @@ class OverlayPrefsTest {
         val decoded = TikuConfig.fromJson(encoded) { it.removePrefix("enc:") }
         assertEquals(custom.tikuConfig, decoded)
     }
+
+    @Test
+    fun defaultPromptsIncludeQuickLookupAndExplanationAndMigrateLegacyDefaults() {
+        val defaultConfig = AppConfig()
+        assertTrue(defaultConfig.systemPrompt.contains("速查"))
+        assertTrue(defaultConfig.systemPrompt.contains("解析"))
+
+        val defaultPrefs = OverlayPrefs()
+        assertTrue(defaultPrefs.quickAskPrompt.contains("速查"))
+        assertTrue(defaultPrefs.quickAskPrompt.contains("解析"))
+
+        assertEquals(
+            AppConfig.DEFAULT_SYSTEM_PROMPT,
+            AppConfig.migrateDefaultSystemPrompt(null)
+        )
+        assertEquals(
+            AppConfig.DEFAULT_SYSTEM_PROMPT,
+            AppConfig.migrateDefaultSystemPrompt("   ")
+        )
+        assertEquals(
+            AppConfig.DEFAULT_SYSTEM_PROMPT,
+            AppConfig.migrateDefaultSystemPrompt(AppConfig.LEGACY_DEFAULT_SYSTEM_PROMPT)
+        )
+        assertEquals(
+            "请用英文回答",
+            AppConfig.migrateDefaultSystemPrompt("请用英文回答")
+        )
+
+        val migratedFromMissing = OverlayPrefs.fromJson("""{"panelOpacity":0.9}""")
+        assertEquals(OverlayPrefs.DEFAULT_QUICK_ASK_PROMPT, migratedFromMissing.quickAskPrompt)
+
+        val migratedFromBlank = OverlayPrefs.fromJson("""{"quickAskPrompt":"  "}""")
+        assertEquals(OverlayPrefs.DEFAULT_QUICK_ASK_PROMPT, migratedFromBlank.quickAskPrompt)
+
+        val migratedFromLegacy = OverlayPrefs.fromJson(
+            """{"quickAskPrompt":"${OverlayPrefs.LEGACY_DEFAULT_QUICK_ASK_PROMPT}"}"""
+        )
+        assertEquals(OverlayPrefs.DEFAULT_QUICK_ASK_PROMPT, migratedFromLegacy.quickAskPrompt)
+
+        val preservedCustom = OverlayPrefs.fromJson("""{"quickAskPrompt":"只输出最终选项"}""")
+        assertEquals("只输出最终选项", preservedCustom.quickAskPrompt)
+    }
 }

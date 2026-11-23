@@ -1,5 +1,6 @@
 package com.scluzlep.searchcx
 
+import com.scluzlep.searchcx.data.OverlayPrefs
 import com.scluzlep.searchcx.overlay.DomImagePreviewItem
 import com.scluzlep.searchcx.overlay.DomQuestionChipItem
 import com.scluzlep.searchcx.overlay.OverlayPromptBuilder
@@ -304,5 +305,27 @@ class OverlayPromptBuilderTest {
         )
         assertEquals(0, qChip.index)
         assertTrue(qChip.selected)
+    }
+
+    @Test
+    fun defaultQuickAskPromptContainsQuickLookupAndExplanationForEmptyInputDom() {
+        assertEquals(OverlayPrefs.DEFAULT_QUICK_ASK_PROMPT, OverlayPromptBuilder.DEFAULT_QUICK_ASK_PROMPT)
+        assertTrue(OverlayPromptBuilder.DEFAULT_QUICK_ASK_PROMPT.contains("速查"))
+        assertTrue(OverlayPromptBuilder.DEFAULT_QUICK_ASK_PROMPT.contains("解析"))
+
+        val rawDom = "题目：已知 f(x)=x^3，求 f'(2)。"
+        val built = OverlayPromptBuilder.buildManual(
+            rawInput = "   ",
+            rawContextText = rawDom,
+            hasImage = false
+        )
+        assertNotNull(built)
+        built!!
+        assertEquals("解析网页内容", built.visibleUserText)
+        assertEquals("DOM HTML", built.contextBadge)
+        assertEquals(
+            "${OverlayPromptBuilder.DEFAULT_QUICK_ASK_PROMPT}\n\n[页面上下文]\n$rawDom",
+            built.apiPrompt
+        )
     }
 }

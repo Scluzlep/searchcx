@@ -84,7 +84,7 @@ data class OverlayPrefs(
     val secureOverlay: Boolean = false,
     val ballDockRight: Boolean = true,
     val ballYFraction: Float = 0.36f,
-    val quickAskPrompt: String = "请直接解析以下内容，给出清晰步骤与最终结论：",
+    val quickAskPrompt: String = DEFAULT_QUICK_ASK_PROMPT,
     val collapsedBallStyle: CollapsedBallStyle = CollapsedBallStyle.BUTTON
 ) {
     fun toJson(): String {
@@ -103,12 +103,29 @@ data class OverlayPrefs(
     }
 
     companion object {
+        const val LEGACY_DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
+        const val DEFAULT_QUICK_ASK_PROMPT = "请给出速查答案和简要解析："
+
+        fun migrateDefaultQuickAskPrompt(raw: String?): String {
+            val trimmed = raw?.trim().orEmpty()
+            return if (trimmed.isEmpty() || trimmed == LEGACY_DEFAULT_QUICK_ASK_PROMPT) {
+                DEFAULT_QUICK_ASK_PROMPT
+            } else {
+                raw!!
+            }
+        }
+
         fun fromJson(rawJson: String): OverlayPrefs {
             val obj = JSONObject(rawJson)
             val defaults = OverlayPrefs()
             val styleName = obj.optString("collapsedBallStyle", defaults.collapsedBallStyle.name)
             val style = CollapsedBallStyle.entries.firstOrNull { it.name == styleName }
                 ?: CollapsedBallStyle.BUTTON
+            val rawQuickAsk = if (obj.has("quickAskPrompt") && !obj.isNull("quickAskPrompt")) {
+                obj.optString("quickAskPrompt", "")
+            } else {
+                null
+            }
             return OverlayPrefs(
                 autoCaptureOnExpand = obj.optBoolean("autoCaptureOnExpand", defaults.autoCaptureOnExpand),
                 longPressAutoAsk = obj.optBoolean("longPressAutoAsk", defaults.longPressAutoAsk),
@@ -122,7 +139,7 @@ data class OverlayPrefs(
                 ballYFraction = obj.optDouble("ballYFraction", defaults.ballYFraction.toDouble())
                     .toFloat()
                     .coerceIn(0.08f, 0.85f),
-                quickAskPrompt = obj.optString("quickAskPrompt", defaults.quickAskPrompt),
+                quickAskPrompt = migrateDefaultQuickAskPrompt(rawQuickAsk),
                 collapsedBallStyle = style
             )
         }
@@ -174,8 +191,19 @@ data class AppConfig(
     companion object {
         const val DEFAULT_OPENAI_ID = "default_openai"
         const val DEFAULT_CODEX_ID = "default_codex"
-        const val DEFAULT_SYSTEM_PROMPT =
+        const val LEGACY_DEFAULT_SYSTEM_PROMPT =
             "你是简洁高效的个人 AI 助手。基于提供的网页 DOM 上下文、截图或用户问题，给出结构清晰、重点突出、推导严谨的解答。"
+        const val DEFAULT_SYSTEM_PROMPT =
+            "你是简洁精准的解题助手。基于提供的题目文本、公式、附图或截图作答，按「速查」与「解析」两部分输出：\n1. 速查：最先直接给出最终答案（选择题标明选项字母与内容，多题按题号逐一列出），方便一眼核对。\n2. 解析：随后用精炼步骤说明核心思路、公式推导或排除依据；若附带题库参考，请独立验算后再下结论。"
+
+        fun migrateDefaultSystemPrompt(raw: String?): String {
+            val trimmed = raw?.trim().orEmpty()
+            return if (trimmed.isEmpty() || trimmed == LEGACY_DEFAULT_SYSTEM_PROMPT) {
+                DEFAULT_SYSTEM_PROMPT
+            } else {
+                raw!!
+            }
+        }
 
         fun defaultOpenAiProfile() = ProviderProfile(
             id = DEFAULT_OPENAI_ID,
@@ -222,8 +250,7 @@ class AppConfigStore(context: Context) {
             ?.takeIf { id -> profiles.any { it.id == id } }
             ?: profiles.first().id
 
-        val systemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, AppConfig.DEFAULT_SYSTEM_PROMPT)
-            ?: AppConfig.DEFAULT_SYSTEM_PROMPT
+        val systemPrompt = AppConfig.migrateDefaultSystemPrompt(prefs.getString(KEY_SYSTEM_PROMPT, null))
 
         val rawOverlay = prefs.getString(KEY_OVERLAY_PREFS_JSON, null)
         val overlayPrefs = if (!rawOverlay.isNullOrBlank()) {

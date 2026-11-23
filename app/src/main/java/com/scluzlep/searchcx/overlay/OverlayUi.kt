@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.scluzlep.searchcx.data.CollapsedBallStyle
 import com.scluzlep.searchcx.data.DomContextSource
+import com.scluzlep.searchcx.data.OverlayPrefs
 import com.scluzlep.searchcx.data.ProviderProfile
 import com.scluzlep.searchcx.ui.MarkdownMessageView
 
@@ -98,7 +99,7 @@ object OverlayPromptBuilder {
     const val CONTEXT_BADGE_CLIPBOARD = "剪贴板文本"
     const val DEFAULT_EMPTY_DOM_LABEL = "解析网页内容"
     const val DEFAULT_IMAGE_ONLY_LABEL = "解析截图内容"
-    const val DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
+    const val DEFAULT_QUICK_ASK_PROMPT = OverlayPrefs.DEFAULT_QUICK_ASK_PROMPT
 
     private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[图片\d*\]""")
 
@@ -705,7 +706,7 @@ fun FloatingPanelComposable(
                         onSearchTikuOnly()
                     }
                     QuickChip("直接解题") {
-                        onQuickAction("直接解题", "请直接解答以下题目或问题，给出关键推导步骤与最终结论：")
+                        onQuickAction("直接解题", "请先给出速查答案，再给出简洁清晰的解析步骤：")
                     }
                     QuickChip("总结要点") {
                         onQuickAction("总结要点", "请提取并条理化总结以下内容的核心要点：")
