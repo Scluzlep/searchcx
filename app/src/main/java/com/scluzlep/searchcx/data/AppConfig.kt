@@ -75,6 +75,31 @@ enum class CollapsedBallStyle(val displayName: String) {
     MINI_DOT("白色小白点")
 }
 
+enum class OverlayThemeMode(val displayName: String, val shortLabel: String) {
+    FOLLOW_SYSTEM("自动", "自"),
+    LIGHT("浅色", "浅"),
+    DARK("深色", "深");
+
+    fun next(): OverlayThemeMode = when (this) {
+        FOLLOW_SYSTEM -> LIGHT
+        LIGHT -> DARK
+        DARK -> FOLLOW_SYSTEM
+    }
+}
+
+enum class ResizeEdge {
+    BOTTOM_RIGHT,
+    BOTTOM_LEFT,
+    BOTTOM
+}
+
+data class WindowBoundsPx(
+    val x: Int,
+    val y: Int,
+    val width: Int,
+    val height: Int
+)
+
 data class OverlayPrefs(
     val autoCaptureOnExpand: Boolean = true,
     val longPressAutoAsk: Boolean = true,
@@ -85,8 +110,23 @@ data class OverlayPrefs(
     val ballDockRight: Boolean = true,
     val ballYFraction: Float = 0.36f,
     val quickAskPrompt: String = DEFAULT_QUICK_ASK_PROMPT,
-    val collapsedBallStyle: CollapsedBallStyle = CollapsedBallStyle.BUTTON
+    val collapsedBallStyle: CollapsedBallStyle = CollapsedBallStyle.BUTTON,
+    val themeMode: OverlayThemeMode = OverlayThemeMode.FOLLOW_SYSTEM,
+    val panelXFraction: Float = UNSET_FRACTION,
+    val panelYFraction: Float = UNSET_FRACTION,
+    val panelWidthDp: Int = 0,
+    val panelHeightDp: Int = 0,
+    val ballDocked: Boolean = true,
+    val ballXFraction: Float = UNSET_FRACTION
 ) {
+    fun withResetWindowBounds(): OverlayPrefs = copy(
+        panelXFraction = UNSET_FRACTION,
+        panelYFraction = UNSET_FRACTION,
+        panelWidthDp = 0,
+        panelHeightDp = 0,
+        panelExpandedTall = false
+    )
+
     fun toJson(): String {
         return JSONObject().apply {
             put("autoCaptureOnExpand", autoCaptureOnExpand)
@@ -99,12 +139,20 @@ data class OverlayPrefs(
             put("ballYFraction", ballYFraction.toDouble())
             put("quickAskPrompt", quickAskPrompt)
             put("collapsedBallStyle", collapsedBallStyle.name)
+            put("themeMode", themeMode.name)
+            put("panelXFraction", panelXFraction.toDouble())
+            put("panelYFraction", panelYFraction.toDouble())
+            put("panelWidthDp", panelWidthDp)
+            put("panelHeightDp", panelHeightDp)
+            put("ballDocked", ballDocked)
+            put("ballXFraction", ballXFraction.toDouble())
         }.toString()
     }
 
     companion object {
         const val LEGACY_DEFAULT_QUICK_ASK_PROMPT = "请直接解析以下内容，给出清晰步骤与最终结论："
         const val DEFAULT_QUICK_ASK_PROMPT = "请给出速查答案和简要解析："
+        const val UNSET_FRACTION = -10f
 
         fun migrateDefaultQuickAskPrompt(raw: String?): String {
             val trimmed = raw?.trim().orEmpty()
@@ -121,10 +169,35 @@ data class OverlayPrefs(
             val styleName = obj.optString("collapsedBallStyle", defaults.collapsedBallStyle.name)
             val style = CollapsedBallStyle.entries.firstOrNull { it.name == styleName }
                 ?: CollapsedBallStyle.BUTTON
+            val themeName = obj.optString("themeMode", defaults.themeMode.name)
+            val themeMode = OverlayThemeMode.entries.firstOrNull { it.name == themeName }
+                ?: OverlayThemeMode.FOLLOW_SYSTEM
             val rawQuickAsk = if (obj.has("quickAskPrompt") && !obj.isNull("quickAskPrompt")) {
                 obj.optString("quickAskPrompt", "")
             } else {
                 null
+            }
+            val rawWidthDp = obj.optInt("panelWidthDp", defaults.panelWidthDp)
+            val panelWidthDp = if (rawWidthDp <= 0) 0 else rawWidthDp.coerceIn(220, 1400)
+            val rawHeightDp = obj.optInt("panelHeightDp", defaults.panelHeightDp)
+            val panelHeightDp = if (rawHeightDp <= 0) 0 else rawHeightDp.coerceIn(220, 1800)
+            val rawPanelX = obj.optDouble("panelXFraction", UNSET_FRACTION.toDouble()).toFloat()
+            val panelXFraction = if (!rawPanelX.isFinite() || rawPanelX <= -5f) {
+                UNSET_FRACTION
+            } else {
+                rawPanelX.coerceIn(-0.95f, 0.98f)
+            }
+            val rawPanelY = obj.optDouble("panelYFraction", UNSET_FRACTION.toDouble()).toFloat()
+            val panelYFraction = if (!rawPanelY.isFinite() || rawPanelY <= -5f) {
+                UNSET_FRACTION
+            } else {
+                rawPanelY.coerceIn(0f, 0.96f)
+            }
+            val rawBallX = obj.optDouble("ballXFraction", UNSET_FRACTION.toDouble()).toFloat()
+            val ballXFraction = if (!rawBallX.isFinite() || rawBallX <= -5f) {
+                UNSET_FRACTION
+            } else {
+                rawBallX.coerceIn(0f, 0.98f)
             }
             return OverlayPrefs(
                 autoCaptureOnExpand = obj.optBoolean("autoCaptureOnExpand", defaults.autoCaptureOnExpand),
@@ -140,9 +213,167 @@ data class OverlayPrefs(
                     .toFloat()
                     .coerceIn(0.08f, 0.85f),
                 quickAskPrompt = migrateDefaultQuickAskPrompt(rawQuickAsk),
-                collapsedBallStyle = style
+                collapsedBallStyle = style,
+                themeMode = themeMode,
+                panelXFraction = panelXFraction,
+                panelYFraction = panelYFraction,
+                panelWidthDp = panelWidthDp,
+                panelHeightDp = panelHeightDp,
+                ballDocked = obj.optBoolean("ballDocked", defaults.ballDocked),
+                ballXFraction = ballXFraction
             )
         }
+    }
+}
+
+object OverlayWindowGeometry {
+    fun minPanelWidthPx(screenW: Int, density: Float): Int {
+        return (248f * density).toInt()
+            .coerceAtMost((screenW - (16f * density).toInt()).coerceAtLeast(120))
+    }
+
+    fun maxPanelWidthPx(screenW: Int, density: Float): Int {
+        return (screenW - (12f * density).toInt())
+            .coerceAtLeast(minPanelWidthPx(screenW, density))
+    }
+
+    fun minPanelHeightPx(screenH: Int, density: Float): Int {
+        return (260f * density).toInt()
+            .coerceAtMost((screenH - (48f * density).toInt()).coerceAtLeast(140))
+    }
+
+    fun maxPanelHeightPx(screenH: Int, density: Float): Int {
+        return (screenH - (36f * density).toInt())
+            .coerceAtLeast(minPanelHeightPx(screenH, density))
+    }
+
+    fun defaultPanelWidthPx(screenW: Int, density: Float): Int {
+        return (screenW * 0.93f).toInt()
+            .coerceAtMost((410f * density).toInt())
+            .coerceIn(minPanelWidthPx(screenW, density), maxPanelWidthPx(screenW, density))
+    }
+
+    fun defaultPanelHeightPx(screenH: Int, density: Float, tall: Boolean): Int {
+        return (screenH * (if (tall) 0.74f else 0.50f)).toInt()
+            .coerceIn(minPanelHeightPx(screenH, density), maxPanelHeightPx(screenH, density))
+    }
+
+    fun clampPanelX(x: Int, panelW: Int, screenW: Int, density: Float): Int {
+        val minVisible = (64f * density).toInt().coerceAtLeast(32)
+        return x.coerceIn(minVisible - panelW, (screenW - minVisible).coerceAtLeast(minVisible - panelW))
+    }
+
+    fun clampPanelY(y: Int, panelH: Int, screenH: Int, density: Float): Int {
+        val minVisible = (64f * density).toInt().coerceAtLeast(32)
+        return y.coerceIn(0, (screenH - minVisible).coerceAtLeast(0))
+    }
+
+    fun resolvePanelBounds(
+        prefs: OverlayPrefs,
+        screenW: Int,
+        screenH: Int,
+        density: Float
+    ): WindowBoundsPx {
+        val minW = minPanelWidthPx(screenW, density)
+        val maxW = maxPanelWidthPx(screenW, density)
+        val w = if (prefs.panelWidthDp > 0) {
+            (prefs.panelWidthDp * density).toInt().coerceIn(minW, maxW)
+        } else {
+            defaultPanelWidthPx(screenW, density)
+        }
+
+        val minH = minPanelHeightPx(screenH, density)
+        val maxH = maxPanelHeightPx(screenH, density)
+        val h = if (prefs.panelHeightDp > 0) {
+            (prefs.panelHeightDp * density).toInt().coerceIn(minH, maxH)
+        } else {
+            defaultPanelHeightPx(screenH, density, prefs.panelExpandedTall)
+        }
+
+        val rawX = if (prefs.panelXFraction.isFinite() && prefs.panelXFraction > -5f) {
+            (prefs.panelXFraction * screenW).toInt()
+        } else {
+            (screenW - w) / 2
+        }
+        val rawY = if (prefs.panelYFraction.isFinite() && prefs.panelYFraction > -5f) {
+            (prefs.panelYFraction * screenH).toInt()
+        } else {
+            (56f * density).toInt()
+        }
+
+        return WindowBoundsPx(
+            x = clampPanelX(rawX, w, screenW, density),
+            y = clampPanelY(rawY, h, screenH, density),
+            width = w,
+            height = h
+        )
+    }
+
+    fun applyPanelDrag(
+        bounds: WindowBoundsPx,
+        dx: Int,
+        dy: Int,
+        screenW: Int,
+        screenH: Int,
+        density: Float
+    ): WindowBoundsPx {
+        return bounds.copy(
+            x = clampPanelX(bounds.x + dx, bounds.width, screenW, density),
+            y = clampPanelY(bounds.y + dy, bounds.height, screenH, density)
+        )
+    }
+
+    fun applyPanelResize(
+        bounds: WindowBoundsPx,
+        edge: ResizeEdge,
+        dx: Int,
+        dy: Int,
+        screenW: Int,
+        screenH: Int,
+        density: Float
+    ): WindowBoundsPx {
+        val minW = minPanelWidthPx(screenW, density)
+        val maxW = maxPanelWidthPx(screenW, density)
+        val minH = minPanelHeightPx(screenH, density)
+        val maxH = maxPanelHeightPx(screenH, density)
+        return when (edge) {
+            ResizeEdge.BOTTOM_RIGHT -> {
+                val newW = (bounds.width + dx).coerceIn(minW, maxW)
+                val newH = (bounds.height + dy).coerceIn(minH, maxH)
+                WindowBoundsPx(
+                    x = clampPanelX(bounds.x, newW, screenW, density),
+                    y = clampPanelY(bounds.y, newH, screenH, density),
+                    width = newW,
+                    height = newH
+                )
+            }
+            ResizeEdge.BOTTOM_LEFT -> {
+                val rightEdge = bounds.x + bounds.width
+                val newW = (bounds.width - dx).coerceIn(minW, maxW)
+                val newX = clampPanelX(rightEdge - newW, newW, screenW, density)
+                val newH = (bounds.height + dy).coerceIn(minH, maxH)
+                WindowBoundsPx(
+                    x = newX,
+                    y = clampPanelY(bounds.y, newH, screenH, density),
+                    width = newW,
+                    height = newH
+                )
+            }
+            ResizeEdge.BOTTOM -> {
+                val newH = (bounds.height + dy).coerceIn(minH, maxH)
+                WindowBoundsPx(
+                    x = clampPanelX(bounds.x, bounds.width, screenW, density),
+                    y = clampPanelY(bounds.y, newH, screenH, density),
+                    width = bounds.width,
+                    height = newH
+                )
+            }
+        }
+    }
+
+    fun shouldSnapBallToEdge(ballX: Int, ballW: Int, screenW: Int, density: Float): Boolean {
+        val snapMargin = (28f * density).toInt()
+        return ballX <= snapMargin || (ballX + ballW) >= (screenW - snapMargin)
     }
 }
 

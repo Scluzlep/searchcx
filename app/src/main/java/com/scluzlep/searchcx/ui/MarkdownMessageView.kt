@@ -72,7 +72,8 @@ fun MarkdownMessageView(
     textColor: Color,
     accentColor: Color,
     onCopyCode: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isDark: Boolean = false
 ) {
     val (tagReasoning, cleanBody) = remember(rawText) { MarkdownParser.splitThinkTags(rawText) }
     val combinedReasoning = remember(reasoningText, tagReasoning) {
@@ -90,6 +91,7 @@ fun MarkdownMessageView(
                 reasoning = combinedReasoning,
                 isStreaming = isStreaming && cleanBody.isBlank(),
                 expanded = reasoningExpanded,
+                isDark = isDark,
                 onToggle = { reasoningExpanded = !reasoningExpanded }
             )
         }
@@ -97,7 +99,10 @@ fun MarkdownMessageView(
         if (blocks.isEmpty() && cleanBody.isBlank() && combinedReasoning.isBlank()) {
             BasicText(
                 text = if (isStreaming) "正在生成回答..." else "",
-                style = TextStyle(color = Color(0xFF8E8E93), fontSize = 13.sp)
+                style = TextStyle(
+                    color = if (isDark) Color(0xFF9CA3AF) else Color(0xFF8E8E93),
+                    fontSize = 13.sp
+                )
             )
             return
         }
@@ -124,6 +129,7 @@ fun MarkdownMessageView(
                                     fontWeight = FontWeight.Bold
                                 ),
                                 accentColor = accentColor,
+                                isDark = isDark,
                                 onLinkClick = onLinkClick
                             )
                         }
@@ -136,6 +142,7 @@ fun MarkdownMessageView(
                                     lineHeight = 20.sp
                                 ),
                                 accentColor = accentColor,
+                                isDark = isDark,
                                 onLinkClick = onLinkClick
                             )
                         }
@@ -152,11 +159,14 @@ fun MarkdownMessageView(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFFEFF6FF))
+                                    .background(if (isDark) Color(0xFF1B2A44) else Color(0xFFEFF6FF))
                                     .horizontalScroll(rememberScrollState())
                                     .padding(horizontal = 12.dp, vertical = 10.dp)
                             ) {
-                                MathBlockView(node = block.node)
+                                MathBlockView(
+                                    node = block.node,
+                                    color = if (isDark) Color(0xFFBFDBFE) else Color(0xFF1E3A8A)
+                                )
                             }
                         }
                         is MdBlock.BlockQuote -> {
@@ -165,7 +175,7 @@ fun MarkdownMessageView(
                                     .fillMaxWidth()
                                     .height(IntrinsicSize.Min)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFFF3F4F6))
+                                    .background(if (isDark) Color(0xFF1E222B) else Color(0xFFF3F4F6))
                                     .padding(vertical = 6.dp, horizontal = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
@@ -178,11 +188,12 @@ fun MarkdownMessageView(
                                 InlineRichText(
                                     inlines = block.inlines,
                                     baseStyle = TextStyle(
-                                        color = Color(0xFF4B5563),
+                                        color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF4B5563),
                                         fontSize = 13.sp,
                                         lineHeight = 19.sp
                                     ),
                                     accentColor = accentColor,
+                                    isDark = isDark,
                                     onLinkClick = onLinkClick
                                 )
                             }
@@ -200,6 +211,7 @@ fun MarkdownMessageView(
                                     TaskCheckbox(
                                         checked = block.checked,
                                         accentColor = accentColor,
+                                        isDark = isDark,
                                         modifier = Modifier.padding(top = 3.dp)
                                     )
                                 } else {
@@ -216,11 +228,16 @@ fun MarkdownMessageView(
                                 InlineRichText(
                                     inlines = block.inlines,
                                     baseStyle = TextStyle(
-                                        color = if (block.checked == true) Color(0xFF6B7280) else textColor,
+                                        color = if (block.checked == true) {
+                                            if (isDark) Color(0xFF9CA3AF) else Color(0xFF6B7280)
+                                        } else {
+                                            textColor
+                                        },
                                         fontSize = 14.sp,
                                         lineHeight = 20.sp
                                     ),
                                     accentColor = accentColor,
+                                    isDark = isDark,
                                     onLinkClick = onLinkClick
                                 )
                             }
@@ -250,6 +267,7 @@ fun MarkdownMessageView(
                                         lineHeight = 20.sp
                                     ),
                                     accentColor = accentColor,
+                                    isDark = isDark,
                                     onLinkClick = onLinkClick
                                 )
                             }
@@ -259,6 +277,7 @@ fun MarkdownMessageView(
                                 headers = block.headerInlines,
                                 rows = block.rowInlines,
                                 accentColor = accentColor,
+                                isDark = isDark,
                                 onLinkClick = onLinkClick
                             )
                         }
@@ -267,7 +286,7 @@ fun MarkdownMessageView(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(1.dp)
-                                    .background(Color(0xFFE5E7EB))
+                                    .background(if (isDark) Color(0xFF374151) else Color(0xFFE5E7EB))
                             )
                         }
                     }
@@ -281,8 +300,10 @@ fun MarkdownMessageView(
 private fun TaskCheckbox(
     checked: Boolean,
     accentColor: Color,
+    isDark: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val uncheckedBorder = if (isDark) Color(0xFF6B7280) else Color(0xFF9CA3AF)
     Box(
         modifier = modifier
             .size(14.dp)
@@ -290,7 +311,7 @@ private fun TaskCheckbox(
             .background(if (checked) accentColor else Color.Transparent)
             .border(
                 width = 1.25.dp,
-                color = if (checked) accentColor else Color(0xFF9CA3AF),
+                color = if (checked) accentColor else uncheckedBorder,
                 shape = RoundedCornerShape(3.dp)
             ),
         contentAlignment = Alignment.Center
@@ -317,13 +338,17 @@ private fun ReasoningCard(
     reasoning: String,
     isStreaming: Boolean,
     expanded: Boolean,
+    isDark: Boolean,
     onToggle: () -> Unit
 ) {
+    val bgColor = if (isDark) Color(0xFF1E222B) else Color(0xFFF3F4F6)
+    val contentColor = if (isDark) Color(0xFFCBD5E1) else Color(0xFF4B5563)
+    val toggleColor = if (isDark) Color(0xFF9CA3AF) else Color(0xFF6B7280)
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFFF3F4F6))
+            .background(bgColor)
             .clickable(onClick = onToggle)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -336,21 +361,21 @@ private fun ReasoningCard(
             BasicText(
                 text = if (isStreaming) "思考中" else "思考过程",
                 style = TextStyle(
-                    color = Color(0xFF4B5563),
+                    color = contentColor,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
             )
             BasicText(
                 text = if (expanded) "收起" else "展开",
-                style = TextStyle(color = Color(0xFF6B7280), fontSize = 11.sp)
+                style = TextStyle(color = toggleColor, fontSize = 11.sp)
             )
         }
         if (expanded) {
             BasicText(
                 text = reasoning,
                 style = TextStyle(
-                    color = Color(0xFF4B5563),
+                    color = contentColor,
                     fontSize = 12.sp,
                     lineHeight = 18.sp
                 )
@@ -417,6 +442,7 @@ private fun TableCard(
     headers: List<List<MdInline>>,
     rows: List<List<List<MdInline>>>,
     accentColor: Color,
+    isDark: Boolean,
     onLinkClick: (String) -> Unit
 ) {
     val colCount = max(headers.size, rows.maxOfOrNull { it.size } ?: 0)
@@ -433,11 +459,16 @@ private fun TableCard(
         }
     }
 
+    val bgColor = if (isDark) Color(0xFF1E222B) else Color(0xFFF9FAFB)
+    val headerTextColor = if (isDark) Color(0xFFF3F4F6) else Color(0xFF111827)
+    val dividerColor = if (isDark) Color(0xFF374151) else Color(0xFFE5E7EB)
+    val cellTextColor = if (isDark) Color(0xFFD1D5DB) else Color(0xFF374151)
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFFF9FAFB))
+            .background(bgColor)
             .horizontalScroll(rememberScrollState())
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -448,12 +479,13 @@ private fun TableCard(
                     InlineRichText(
                         inlines = headers.getOrNull(c).orEmpty(),
                         baseStyle = TextStyle(
-                            color = Color(0xFF111827),
+                            color = headerTextColor,
                             fontSize = 12.sp,
                             lineHeight = 17.sp,
                             fontWeight = FontWeight.Bold
                         ),
                         accentColor = accentColor,
+                        isDark = isDark,
                         onLinkClick = onLinkClick
                     )
                 }
@@ -463,7 +495,7 @@ private fun TableCard(
             modifier = Modifier
                 .width(colWidths.fold(0.dp) { acc, w -> acc + w } + (12 * (colCount - 1)).dp)
                 .height(1.dp)
-                .background(Color(0xFFE5E7EB))
+                .background(dividerColor)
         )
         rows.forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -472,11 +504,12 @@ private fun TableCard(
                         InlineRichText(
                             inlines = row.getOrNull(c).orEmpty(),
                             baseStyle = TextStyle(
-                                color = Color(0xFF374151),
+                                color = cellTextColor,
                                 fontSize = 12.sp,
                                 lineHeight = 17.sp
                             ),
                             accentColor = accentColor,
+                            isDark = isDark,
                             onLinkClick = onLinkClick
                         )
                     }
@@ -508,15 +541,17 @@ private fun InlineRichText(
     inlines: List<MdInline>,
     baseStyle: TextStyle,
     accentColor: Color,
+    isDark: Boolean,
     onLinkClick: (String) -> Unit
 ) {
     val baseSize = if (baseStyle.fontSize.isSpecified) baseStyle.fontSize else 14.sp
-    val annotated: AnnotatedString = remember(inlines, accentColor, baseSize) {
+    val annotated: AnnotatedString = remember(inlines, accentColor, baseSize, isDark) {
         buildAnnotatedString {
             appendMdInlines(
                 inlines = inlines,
                 baseFontSize = baseSize,
                 accentColor = accentColor,
+                isDark = isDark,
                 onLinkClick = onLinkClick
             )
         }
@@ -528,6 +563,7 @@ private fun AnnotatedString.Builder.appendMdInlines(
     inlines: List<MdInline>,
     baseFontSize: TextUnit,
     accentColor: Color,
+    isDark: Boolean,
     onLinkClick: (String) -> Unit
 ) {
     for (inline in inlines) {
@@ -535,14 +571,14 @@ private fun AnnotatedString.Builder.appendMdInlines(
             is MdInline.Plain -> append(inline.text)
             is MdInline.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                 if (inline.children.isNotEmpty()) {
-                    appendMdInlines(inline.children, baseFontSize, accentColor, onLinkClick)
+                    appendMdInlines(inline.children, baseFontSize, accentColor, isDark, onLinkClick)
                 } else {
                     append(inline.text)
                 }
             }
             is MdInline.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                 if (inline.children.isNotEmpty()) {
-                    appendMdInlines(inline.children, baseFontSize, accentColor, onLinkClick)
+                    appendMdInlines(inline.children, baseFontSize, accentColor, isDark, onLinkClick)
                 } else {
                     append(inline.text)
                 }
@@ -551,14 +587,14 @@ private fun AnnotatedString.Builder.appendMdInlines(
                 SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)
             ) {
                 if (inline.children.isNotEmpty()) {
-                    appendMdInlines(inline.children, baseFontSize, accentColor, onLinkClick)
+                    appendMdInlines(inline.children, baseFontSize, accentColor, isDark, onLinkClick)
                 } else {
                     append(inline.text)
                 }
             }
             is MdInline.Strike -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
                 if (inline.children.isNotEmpty()) {
-                    appendMdInlines(inline.children, baseFontSize, accentColor, onLinkClick)
+                    appendMdInlines(inline.children, baseFontSize, accentColor, isDark, onLinkClick)
                 } else {
                     append(inline.text)
                 }
@@ -566,8 +602,8 @@ private fun AnnotatedString.Builder.appendMdInlines(
             is MdInline.InlineCode -> withStyle(
                 SpanStyle(
                     fontFamily = FontFamily.Monospace,
-                    background = Color(0xFFE5E7EB),
-                    color = Color(0xFF1E293B)
+                    background = if (isDark) Color(0xFF333947) else Color(0xFFE5E7EB),
+                    color = if (isDark) Color(0xFFE2E8F0) else Color(0xFF1E293B)
                 )
             ) {
                 append(" ${inline.code} ")
@@ -575,8 +611,8 @@ private fun AnnotatedString.Builder.appendMdInlines(
             is MdInline.InlineMath -> withStyle(
                 SpanStyle(
                     fontFamily = FontFamily.Serif,
-                    color = Color(0xFF1D4ED8),
-                    background = Color(0xFFEFF6FF),
+                    color = if (isDark) Color(0xFF93C5FD) else Color(0xFF1D4ED8),
+                    background = if (isDark) Color(0xFF1E2F4D) else Color(0xFFEFF6FF),
                     fontWeight = FontWeight.Medium
                 )
             ) {

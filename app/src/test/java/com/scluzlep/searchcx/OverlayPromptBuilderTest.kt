@@ -1,12 +1,15 @@
 package com.scluzlep.searchcx
 
 import com.scluzlep.searchcx.data.OverlayPrefs
+import com.scluzlep.searchcx.data.OverlayThemeMode
 import com.scluzlep.searchcx.overlay.DomImagePreviewItem
 import com.scluzlep.searchcx.overlay.DomQuestionChipItem
 import com.scluzlep.searchcx.overlay.OverlayPromptBuilder
 import com.scluzlep.searchcx.overlay.OverlayUiState
+import com.scluzlep.searchcx.overlay.overlayPalette
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -305,6 +308,41 @@ class OverlayPromptBuilderTest {
         )
         assertEquals(0, qChip.index)
         assertTrue(qChip.selected)
+
+        assertFalse(state.isDark)
+        assertEquals(OverlayThemeMode.FOLLOW_SYSTEM, state.themeMode)
+        assertTrue(state.ballDocked)
+    }
+
+    @Test
+    fun overlayPaletteProvidesDistinctLightAndDarkTokensAndThemeCycling() {
+        val light = overlayPalette(isDark = false)
+        val dark = overlayPalette(isDark = true)
+
+        assertFalse(light.isDark)
+        assertTrue(dark.isDark)
+        assertNotEquals(light.cardBg, dark.cardBg)
+        assertNotEquals(light.headerBg, dark.headerBg)
+        assertNotEquals(light.surfaceGray, dark.surfaceGray)
+        assertNotEquals(light.textPrimary, dark.textPrimary)
+        assertNotEquals(light.accent, dark.accent)
+        assertNotEquals(light.warningBg, dark.warningBg)
+        assertNotEquals(light.userBubbleBg, dark.userBubbleBg)
+        assertNotEquals(light.assistantBubbleBg, dark.assistantBubbleBg)
+        assertNotEquals(light.ballBg, dark.ballBg)
+
+        assertEquals("自", OverlayThemeMode.FOLLOW_SYSTEM.shortLabel)
+        assertEquals("浅", OverlayThemeMode.LIGHT.shortLabel)
+        assertEquals("深", OverlayThemeMode.DARK.shortLabel)
+        assertEquals(OverlayThemeMode.LIGHT, OverlayThemeMode.FOLLOW_SYSTEM.next())
+        assertEquals(OverlayThemeMode.DARK, OverlayThemeMode.LIGHT.next())
+        assertEquals(OverlayThemeMode.FOLLOW_SYSTEM, OverlayThemeMode.DARK.next())
+
+        val reset = OverlayPrefs(panelXFraction = 0.25f, panelWidthDp = 320, panelExpandedTall = true)
+            .withResetWindowBounds()
+        assertEquals(OverlayPrefs.UNSET_FRACTION, reset.panelXFraction)
+        assertEquals(0, reset.panelWidthDp)
+        assertFalse(reset.panelExpandedTall)
     }
 
     @Test

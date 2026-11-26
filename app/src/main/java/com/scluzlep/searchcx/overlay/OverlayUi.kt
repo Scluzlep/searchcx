@@ -1,8 +1,6 @@
 package com.scluzlep.searchcx.overlay
 
 import android.graphics.Bitmap
-import android.view.MotionEvent
-import android.view.View
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -19,7 +17,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -40,24 +37,36 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -65,11 +74,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.scluzlep.searchcx.data.CollapsedBallStyle
 import com.scluzlep.searchcx.data.DomContextSource
 import com.scluzlep.searchcx.data.OverlayPrefs
+import com.scluzlep.searchcx.data.OverlayThemeMode
 import com.scluzlep.searchcx.data.ProviderProfile
+import com.scluzlep.searchcx.data.ResizeEdge
 import com.scluzlep.searchcx.ui.MarkdownMessageView
 
 data class ChatUiMessage(
@@ -240,120 +250,314 @@ data class OverlayUiState(
     val availableContextSources: List<DomContextSource> = emptyList(),
     val questionChips: List<DomQuestionChipItem> = emptyList(),
     val domImagePreviews: List<DomImagePreviewItem> = emptyList(),
-    val hasObfuscatedFont: Boolean = false
+    val hasObfuscatedFont: Boolean = false,
+    val isDark: Boolean = false,
+    val themeMode: OverlayThemeMode = OverlayThemeMode.FOLLOW_SYSTEM,
+    val ballDocked: Boolean = true
 )
 
-private val ACCENT_BLUE = Color(0xFF3482FF)
-private val ACCENT_SOFT = Color(0xFFEAF2FF)
-private val CARD_BG = Color(0xFFFFFFFF)
-private val SURFACE_GRAY = Color(0xFFF2F2F7)
-private val TEXT_PRIMARY = Color(0xFF111827)
-private val TEXT_SECONDARY = Color(0xFF6B7280)
-private val BORDER_SUBTLE = Color(0xFFE5E7EB)
+data class OverlayPalette(
+    val isDark: Boolean,
+    val accent: Color,
+    val accentSoft: Color,
+    val cardBg: Color,
+    val headerBg: Color,
+    val contextStripBg: Color,
+    val surfaceGray: Color,
+    val chipBg: Color,
+    val chipInnerBg: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val placeholderText: Color,
+    val borderSubtle: Color,
+    val warningBg: Color,
+    val warningText: Color,
+    val warningActionBg: Color,
+    val userBubbleBg: Color,
+    val assistantBubbleBg: Color,
+    val danger: Color,
+    val dangerText: Color,
+    val grabberColor: Color,
+    val resizeGrip: Color,
+    val ballBg: Color,
+    val ballBorder: Color,
+    val unreadDotBg: Color,
+    val excludedOverlayBg: Color
+)
+
+val LocalOverlayPalette = staticCompositionLocalOf { overlayPalette(false) }
+
+fun overlayPalette(isDark: Boolean): OverlayPalette = if (isDark) {
+    OverlayPalette(
+        isDark = true,
+        accent = Color(0xFF60A5FA),
+        accentSoft = Color(0xFF1E2D45),
+        cardBg = Color(0xFF14161D),
+        headerBg = Color(0xFF191C25),
+        contextStripBg = Color(0xFF171A23),
+        surfaceGray = Color(0xFF222632),
+        chipBg = Color(0xFF262B38),
+        chipInnerBg = Color(0xFF2C3242),
+        textPrimary = Color(0xFFF3F4F6),
+        textSecondary = Color(0xFF9CA3AF),
+        placeholderText = Color(0xFF7E879B),
+        borderSubtle = Color(0xFF2E3342),
+        warningBg = Color(0xFF3B2A14),
+        warningText = Color(0xFFFCD34D),
+        warningActionBg = Color(0xFFD97706),
+        userBubbleBg = Color(0xFF2563EB),
+        assistantBubbleBg = Color(0xFF1F2430),
+        danger = Color(0xFFEF4444),
+        dangerText = Color(0xFFF87171),
+        grabberColor = Color(0xFF4B5563),
+        resizeGrip = Color(0x9994A3B8),
+        ballBg = Color(0xFA1E222D),
+        ballBorder = Color(0xFF333A4D),
+        unreadDotBg = Color(0xFF22C55E),
+        excludedOverlayBg = Color(0xB3111827)
+    )
+} else {
+    OverlayPalette(
+        isDark = false,
+        accent = Color(0xFF3482FF),
+        accentSoft = Color(0xFFEAF2FF),
+        cardBg = Color(0xFFFFFFFF),
+        headerBg = Color(0xFFF9FAFB),
+        contextStripBg = Color(0xFFFAFAFC),
+        surfaceGray = Color(0xFFF2F2F7),
+        chipBg = Color(0xFFECEFF4),
+        chipInnerBg = Color(0xFFFFFFFF),
+        textPrimary = Color(0xFF111827),
+        textSecondary = Color(0xFF6B7280),
+        placeholderText = Color(0xFF9CA3AF),
+        borderSubtle = Color(0xFFE5E7EB),
+        warningBg = Color(0xFFFEF3C7),
+        warningText = Color(0xFF92400E),
+        warningActionBg = Color(0xFFD97706),
+        userBubbleBg = Color(0xFF3482FF),
+        assistantBubbleBg = Color(0xFFF2F2F7),
+        danger = Color(0xFFEF4444),
+        dangerText = Color(0xFFDC2626),
+        grabberColor = Color(0xFFD1D5DB),
+        resizeGrip = Color(0xAA9CA3AF),
+        ballBg = Color(0xFAFFFFFF),
+        ballBorder = Color(0xFFDCE3EE),
+        unreadDotBg = Color(0xFF22C55E),
+        excludedOverlayBg = Color(0xB3111827)
+    )
+}
+
+@Composable
+private fun Modifier.rawScreenDrag(
+    useTouchSlop: Boolean,
+    onDelta: (dx: Int, dy: Int) -> Unit,
+    onEnd: () -> Unit
+): Modifier {
+    val hostView = LocalView.current
+    val currentOnDelta by rememberUpdatedState(onDelta)
+    val currentOnEnd by rememberUpdatedState(onEnd)
+    val layoutCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
+
+    return this
+        .onGloballyPositioned { layoutCoordsRef[0] = it }
+        .pointerInput(useTouchSlop) {
+            val loc = IntArray(2)
+            val touchSlop = if (useTouchSlop) viewConfiguration.touchSlop else 0f
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                fun toScreen(localPos: Offset): Offset {
+                    hostView.getLocationOnScreen(loc)
+                    val coords = layoutCoordsRef[0]
+                    val rootPos = if (coords != null && coords.isAttached) {
+                        coords.localToRoot(localPos)
+                    } else {
+                        localPos
+                    }
+                    return Offset(loc[0] + rootPos.x, loc[1] + rootPos.y)
+                }
+
+                val startScreen = toScreen(down.position)
+                var lastRawX = startScreen.x
+                var lastRawY = startScreen.y
+                var dragging = !useTouchSlop
+                var hasMoved = false
+                try {
+                    while (true) {
+                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: event.changes.firstOrNull()
+                            ?: break
+                        if (!change.pressed) {
+                            if (dragging && hasMoved) {
+                                change.consume()
+                            }
+                            break
+                        }
+                        val curScreen = toScreen(change.position)
+                        if (!dragging) {
+                            val distX = curScreen.x - startScreen.x
+                            val distY = curScreen.y - startScreen.y
+                            if (distX * distX + distY * distY > touchSlop * touchSlop) {
+                                dragging = true
+                            }
+                        }
+                        if (dragging) {
+                            change.consume()
+                            val dx = (curScreen.x - lastRawX).toInt()
+                            val dy = (curScreen.y - lastRawY).toInt()
+                            if (dx != 0 || dy != 0) {
+                                hasMoved = true
+                                lastRawX += dx
+                                lastRawY += dy
+                                currentOnDelta(dx, dy)
+                            }
+                        }
+                    }
+                } finally {
+                    if (dragging && hasMoved) {
+                        currentOnEnd()
+                    }
+                }
+            }
+        }
+}
 
 /**
- * 大学搜题酱-inspired edge-docked collapsed entry: either a fixed tiny white shadowed dot
+ * Edge-docked or freely floating collapsed entry: either a compact dot
  * or a compact textless circular icon button, expanding on tap and capturing on long press.
  */
 @Composable
 fun FloatingBallComposable(
     state: OverlayUiState
 ) {
-    val retracted = state.ballIdleRetracted && !state.isGenerating
-    when (state.collapsedBallStyle) {
-        CollapsedBallStyle.MINI_DOT -> {
-            val alpha by animateFloatAsState(if (retracted) 0.62f else 0.96f, label = "miniDotAlpha")
-            val edgeShift by animateDpAsState(
-                targetValue = when {
-                    !retracted -> 0.dp
-                    state.ballDockRight -> 5.dp
-                    else -> (-5).dp
-                },
-                label = "miniDotShift"
-            )
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .offset(x = edgeShift)
-                    .alpha(alpha),
-                contentAlignment = Alignment.Center
-            ) {
+    CompositionLocalProvider(LocalOverlayPalette provides overlayPalette(state.isDark)) {
+        val palette = LocalOverlayPalette.current
+        val retracted = state.ballDocked && state.ballIdleRetracted && !state.isGenerating
+        when (state.collapsedBallStyle) {
+            CollapsedBallStyle.MINI_DOT -> {
+                val alphaScale by animateFloatAsState(if (retracted) 0.65f else 0.98f, label = "miniDotAlpha")
+                val edgeShift by animateDpAsState(
+                    targetValue = when {
+                        !retracted -> 0.dp
+                        state.ballDockRight -> 5.dp
+                        else -> (-5).dp
+                    },
+                    label = "miniDotShift"
+                )
                 Box(
                     modifier = Modifier
-                        .size(12.dp)
-                        .shadow(
-                            elevation = 6.dp,
-                            shape = CircleShape,
-                            ambientColor = Color(0x66000000),
-                            spotColor = Color(0x88000000),
-                            clip = false
-                        )
-                        .clip(CircleShape)
-                        .background(Color.White)
-                        .border(0.6.dp, Color(0x24000000), CircleShape)
-                )
-            }
-        }
-        CollapsedBallStyle.BUTTON -> {
-            val alpha by animateFloatAsState(if (retracted) 0.52f else 0.97f, label = "ballAlpha")
-            val edgeShift by animateDpAsState(
-                targetValue = when {
-                    !retracted -> 0.dp
-                    state.ballDockRight -> 14.dp
-                    else -> (-14).dp
-                },
-                label = "ballShift"
-            )
-
-            Box(
-                modifier = Modifier
-                    .padding(6.dp)
-                    .offset(x = edgeShift)
-                    .alpha(alpha)
-            ) {
-                Box(
-                    modifier = Modifier.size(42.dp),
+                        .size(40.dp)
+                        .offset(x = edgeShift),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .shadow(10.dp, CircleShape, clip = false)
-                            .clip(CircleShape)
-                            .background(if (state.isGenerating) ACCENT_BLUE else Color(0xFAFFFFFF))
-                            .border(
-                                width = 1.dp,
-                                color = if (state.isGenerating) ACCENT_BLUE else Color(0xFFDCE3EE),
-                                shape = CircleShape
+                    Canvas(modifier = Modifier.size(40.dp)) {
+                        val dotCenter = center
+                        val shadowRadius = 13.dp.toPx()
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                0.0f to Color.Black.copy(alpha = 0.46f * alphaScale),
+                                0.45f to Color.Black.copy(alpha = 0.30f * alphaScale),
+                                0.75f to Color.Black.copy(alpha = 0.10f * alphaScale),
+                                1.0f to Color.Transparent,
+                                center = dotCenter,
+                                radius = shadowRadius
                             ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        val iconColor = if (state.isGenerating) Color.White else ACCENT_BLUE
-                        Canvas(modifier = Modifier.size(18.dp)) {
-                            val cx = size.width / 2f
-                            val cy = size.height / 2f
-                            val rOuter = size.minDimension * 0.48f
-                            val rInner = size.minDimension * 0.16f
-                            val path = Path().apply {
-                                moveTo(cx, cy - rOuter)
-                                quadraticTo(cx + rInner, cy - rInner, cx + rOuter, cy)
-                                quadraticTo(cx + rInner, cy + rInner, cx, cy + rOuter)
-                                quadraticTo(cx - rInner, cy + rInner, cx - rOuter, cy)
-                                quadraticTo(cx - rInner, cy - rInner, cx, cy - rOuter)
-                                close()
-                            }
-                            drawPath(path = path, color = iconColor)
+                            radius = shadowRadius,
+                            center = dotCenter
+                        )
+                        val dotRadius = 6.dp.toPx()
+                        drawCircle(
+                            color = Color.White.copy(alpha = alphaScale),
+                            radius = dotRadius,
+                            center = dotCenter
+                        )
+                        drawCircle(
+                            color = Color.Black.copy(alpha = 0.18f * alphaScale),
+                            radius = dotRadius,
+                            center = dotCenter,
+                            style = Stroke(width = 0.75.dp.toPx())
+                        )
+                        if (!state.isGenerating && state.ballHasUnreadReply) {
+                            val unreadRadius = 2.6.dp.toPx()
+                            val unreadCenter = Offset(
+                                x = dotCenter.x + 4.4.dp.toPx(),
+                                y = dotCenter.y - 4.4.dp.toPx()
+                            )
+                            drawCircle(
+                                color = palette.unreadDotBg.copy(alpha = alphaScale),
+                                radius = unreadRadius,
+                                center = unreadCenter
+                            )
+                            drawCircle(
+                                color = Color.White.copy(alpha = alphaScale),
+                                radius = unreadRadius,
+                                center = unreadCenter,
+                                style = Stroke(width = 0.9.dp.toPx())
+                            )
                         }
                     }
-                    if (!state.isGenerating && state.ballHasUnreadReply) {
+                }
+            }
+            CollapsedBallStyle.BUTTON -> {
+                val alpha by animateFloatAsState(if (retracted) 0.52f else 0.97f, label = "ballAlpha")
+                val edgeShift by animateDpAsState(
+                    targetValue = when {
+                        !retracted -> 0.dp
+                        state.ballDockRight -> 14.dp
+                        else -> (-14).dp
+                    },
+                    label = "ballShift"
+                )
+
+                Box(
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .offset(x = edgeShift)
+                        .alpha(alpha)
+                ) {
+                    Box(
+                        modifier = Modifier.size(42.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(9.dp)
+                                .size(42.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF22C55E))
-                                .border(1.5.dp, Color.White, CircleShape)
-                        )
+                                .background(if (state.isGenerating) palette.accent else palette.ballBg)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (state.isGenerating) palette.accent else palette.ballBorder,
+                                    shape = CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val iconColor = if (state.isGenerating) Color.White else palette.accent
+                            Canvas(modifier = Modifier.size(18.dp)) {
+                                val cx = size.width / 2f
+                                val cy = size.height / 2f
+                                val rOuter = size.minDimension * 0.48f
+                                val rInner = size.minDimension * 0.16f
+                                val path = Path().apply {
+                                    moveTo(cx, cy - rOuter)
+                                    quadraticTo(cx + rInner, cy - rInner, cx + rOuter, cy)
+                                    quadraticTo(cx + rInner, cy + rInner, cx, cy + rOuter)
+                                    quadraticTo(cx - rInner, cy + rInner, cx - rOuter, cy)
+                                    quadraticTo(cx - rInner, cy - rInner, cx, cy - rOuter)
+                                    close()
+                                }
+                                drawPath(path = path, color = iconColor)
+                            }
+                        }
+                        if (!state.isGenerating && state.ballHasUnreadReply) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(9.dp)
+                                    .clip(CircleShape)
+                                    .background(palette.unreadDotBg)
+                                    .border(1.5.dp, palette.ballBg, CircleShape)
+                            )
+                        }
                     }
                 }
             }
@@ -388,84 +592,74 @@ fun FloatingPanelComposable(
     onSelectContextSource: (DomContextSource) -> Unit = {},
     onToggleQuestionIndex: (Int) -> Unit = {},
     onSelectAllQuestions: () -> Unit = {},
-    onToggleDomImageIncluded: (Int) -> Unit = {}
+    onToggleDomImageIncluded: (Int) -> Unit = {},
+    onDragEnd: () -> Unit = {},
+    onResizeDelta: (ResizeEdge, Int, Int) -> Unit = { _, _, _ -> },
+    onResizeEnd: () -> Unit = {},
+    onSetThemeMode: (OverlayThemeMode) -> Unit = {},
+    onResetWindowBounds: () -> Unit = {}
 ) {
-    var showProfileMenu by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+    CompositionLocalProvider(LocalOverlayPalette provides overlayPalette(state.isDark)) {
+        val palette = LocalOverlayPalette.current
+        var showProfileMenu by remember { mutableStateOf(false) }
+        val listState = rememberLazyListState()
+        val panelShape = remember { RoundedCornerShape(22.dp) }
 
-    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
-        if (state.messages.isNotEmpty()) {
-            listState.scrollToItem(state.messages.lastIndex)
+        LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
+            if (state.messages.isNotEmpty()) {
+                listState.scrollToItem(state.messages.lastIndex)
+            }
         }
-    }
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .alpha(state.panelOpacity)
-            .padding(4.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .shadow(14.dp, RoundedCornerShape(22.dp), clip = false)
-                .clip(RoundedCornerShape(22.dp))
-                .background(CARD_BG)
-                .border(1.dp, BORDER_SUBTLE, RoundedCornerShape(22.dp))
-        ) {
-            // Draggable top grabber + header strip
+        Box(modifier = Modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFF9FAFB))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = state.panelOpacity
+                        shape = panelShape
+                        clip = true
+                    }
+                    .background(palette.cardBg)
+                    .border(1.dp, palette.borderSubtle, panelShape)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    // AndroidView touch handle gives rock-solid rawX/rawY WindowManager dragging
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFECEFF4))
-                    ) {
-                        AndroidView(
-                            factory = { ctx ->
-                                View(ctx).apply {
-                                    var downRawX = 0f
-                                    var downRawY = 0f
-                                    setOnTouchListener { _, ev ->
-                                        when (ev.actionMasked) {
-                                            MotionEvent.ACTION_DOWN -> {
-                                                downRawX = ev.rawX
-                                                downRawY = ev.rawY
-                                                true
-                                            }
-                                            MotionEvent.ACTION_MOVE -> {
-                                                val dx = (ev.rawX - downRawX).toInt()
-                                                val dy = (ev.rawY - downRawY).toInt()
-                                                if (dx != 0 || dy != 0) {
-                                                    downRawX = ev.rawX
-                                                    downRawY = ev.rawY
-                                                    onDragDelta(dx, dy)
-                                                }
-                                                true
-                                            }
-                                            else -> false
-                                        }
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().height(26.dp)
+                // Draggable top grabber + header strip
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.headerBg)
+                        .rawScreenDrag(
+                            useTouchSlop = true,
+                            onDelta = onDragDelta,
+                            onEnd = onDragEnd
                         )
+                        .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 36.dp, height = 4.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(palette.grabberColor)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
                         Row(
                             modifier = Modifier
-                                .fillMaxWidth()
+                                .weight(1f)
                                 .height(26.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(palette.chipBg)
+                                .clickable { showProfileMenu = !showProfileMenu }
                                 .padding(horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -475,415 +669,540 @@ fun FloatingPanelComposable(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = TextStyle(
-                                    color = TEXT_PRIMARY,
+                                    color = palette.textPrimary,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold
                                 ),
-                                modifier = Modifier
-                                    .weight(1f, fill = false)
-                                    .clickable { showProfileMenu = !showProfileMenu }
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                             BasicText(
                                 text = " 切换 ▾",
-                                style = TextStyle(color = ACCENT_BLUE, fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                modifier = Modifier.clickable { showProfileMenu = !showProfileMenu }
+                                style = TextStyle(
+                                    color = palette.accent,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                        }
+
+                        SmallHeaderIconButton(state.themeMode.shortLabel) {
+                            onSetThemeMode(state.themeMode.next())
+                        }
+                        SmallHeaderIconButton(if (state.isTallMode) "半" else "全", onToggleTall)
+                        SmallHeaderIconButton("透", onToggleOpacityBar)
+                        SmallHeaderIconButton("—", onCollapse)
+                    }
+
+                    // Profile switcher tray
+                    AnimatedVisibility(visible = showProfileMenu) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            state.profiles.forEach { p ->
+                                val selected = p.id == state.activeProfileId
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (selected) palette.accent else palette.chipBg)
+                                        .clickable {
+                                            onSelectProfile(p.id)
+                                            showProfileMenu = false
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    BasicText(
+                                        text = "${p.name} (${p.model})",
+                                        style = TextStyle(
+                                            color = if (selected) Color.White else palette.textPrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Compact appearance tray (opacity presets + window bounds reset)
+                    AnimatedVisibility(visible = state.showOpacityBar) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BasicText(
+                                text = "透明度:",
+                                style = TextStyle(color = palette.textSecondary, fontSize = 11.sp)
+                            )
+                            listOf(0.55f to "55%", 0.75f to "75%", 0.90f to "90%", 1.0f to "100%").forEach { (op, lbl) ->
+                                val selected = kotlin.math.abs(state.panelOpacity - op) < 0.04f
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (selected) palette.accent else palette.chipBg)
+                                        .clickable { onSetOpacity(op) }
+                                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                                ) {
+                                    BasicText(
+                                        text = lbl,
+                                        style = TextStyle(
+                                            color = if (selected) Color.White else palette.textPrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.chipBg)
+                                    .border(1.dp, palette.borderSubtle, RoundedCornerShape(10.dp))
+                                    .clickable(onClick = onResetWindowBounds)
+                                    .padding(horizontal = 9.dp, vertical = 4.dp)
+                            ) {
+                                BasicText(
+                                    text = "重置",
+                                    style = TextStyle(
+                                        color = palette.textSecondary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    // Dual input trigger row (读DOM + 截屏框选 + 剪贴板 + 清空)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val domLabel = if (state.domStatus == "抓取 DOM 中...") "抓取中..." else "读DOM"
+                        ActionPill(domLabel, palette.accentSoft, palette.accent, Modifier.weight(1f), onCaptureDom)
+                        ActionPill("截屏框选", palette.accent, Color.White, Modifier.weight(1.1f), onCaptureScreen)
+                        ActionPill("剪贴板", palette.chipBg, palette.textPrimary, Modifier.weight(0.85f), onPasteClipboard)
+                        ActionPill("清空", palette.chipBg, palette.textSecondary, Modifier.weight(0.65f), onClearChat)
+                    }
+                }
+
+                // Compact context chips + quick actions strip
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.contextStripBg)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (state.contextText.isNotBlank()) {
+                        val baseLabel = OverlayPromptBuilder.quoteBadgeForStatus(state.domStatus)
+                        val quoteLabel = OverlayPromptBuilder.formatQuoteBadge(
+                            baseLabel = baseLabel,
+                            questionCount = state.domQuestionCount,
+                            imageCount = state.domImageCount
+                        )
+                        QuoteReferenceBlock(
+                            label = quoteLabel,
+                            containerBg = palette.accentSoft,
+                            barColor = palette.accent,
+                            barWidth = 3.dp,
+                            textColor = palette.accent,
+                            verticalPadding = 4.dp,
+                            onClick = onToggleContextPreview,
+                            trailing = {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CompactActionPill(
+                                        label = if (state.isContextPreviewExpanded) "收起" else "预览",
+                                        textColor = palette.accent,
+                                        onClick = onToggleContextPreview
+                                    )
+                                    CompactRemoveButton(onClick = onClearContext)
+                                }
+                            }
+                        )
+
+                        AnimatedVisibility(visible = state.isContextPreviewExpanded) {
+                            ContextPreviewCard(
+                                state = state,
+                                onSelectContextSource = onSelectContextSource,
+                                onToggleQuestionIndex = onToggleQuestionIndex,
+                                onSelectAllQuestions = onSelectAllQuestions,
+                                onToggleDomImageIncluded = onToggleDomImageIncluded
                             )
                         }
                     }
 
-                    SmallHeaderIconButton(if (state.isTallMode) "半" else "全", onToggleTall)
-                    SmallHeaderIconButton("透", onToggleOpacityBar)
-                    SmallHeaderIconButton("—", onCollapse)
-                }
+                    if (state.warningText.isNotBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.warningBg)
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BasicText(
+                                text = state.warningText,
+                                style = TextStyle(color = palette.warningText, fontSize = 11.sp, lineHeight = 16.sp),
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (state.hasObfuscatedFont) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(palette.warningActionBg)
+                                        .clickable(onClick = onCaptureScreen)
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    BasicText(
+                                        text = "截屏框选",
+                                        style = TextStyle(
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
 
-                // Profile switcher tray
-                AnimatedVisibility(visible = showProfileMenu) {
+                    if (state.attachedImage != null) {
+                        val bmp = state.attachedImage
+                        val imgBitmap = remember(bmp) { bmp.asImageBitmap() }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(palette.surfaceGray)
+                                .padding(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Image(
+                                bitmap = imgBitmap,
+                                contentDescription = "Crop preview",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 76.dp, height = 48.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                BasicText(
+                                    text = "已附加截图 ${bmp.width}×${bmp.height}",
+                                    style = TextStyle(
+                                        color = palette.textPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                )
+                                BasicText(
+                                    text = "将随本次提问发送给 AI",
+                                    style = TextStyle(color = palette.textSecondary, fontSize = 11.sp)
+                                )
+                            }
+                            CompactRemoveButton(onClick = onRemoveAttachedImage)
+                        }
+                    }
+
+                    // Quick prompt chips
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        state.profiles.forEach { p ->
-                            val selected = p.id == state.activeProfileId
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(if (selected) ACCENT_BLUE else SURFACE_GRAY)
-                                    .clickable {
-                                        onSelectProfile(p.id)
-                                        showProfileMenu = false
-                                    }
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
-                            ) {
-                                BasicText(
-                                    text = "${p.name} (${p.model})",
-                                    style = TextStyle(
-                                        color = if (selected) Color.White else TEXT_PRIMARY,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                )
-                            }
+                        QuickChip("查题库") {
+                            onSearchTikuOnly()
+                        }
+                        QuickChip("直接解题") {
+                            onQuickAction("直接解题", "请先给出速查答案，再给出简洁清晰的解析步骤：")
+                        }
+                        QuickChip("总结要点") {
+                            onQuickAction("总结要点", "请提取并条理化总结以下内容的核心要点：")
+                        }
+                        QuickChip("准确翻译") {
+                            onQuickAction("准确翻译", "请将以下内容准确翻译为中文：")
+                        }
+                        QuickChip("仅发原文") {
+                            onQuickAction("仅发原文", "")
                         }
                     }
                 }
 
-                // Opacity bar
-                AnimatedVisibility(visible = state.showOpacityBar) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        BasicText(
-                            text = "透明度:",
-                            style = TextStyle(color = TEXT_SECONDARY, fontSize = 11.sp)
-                        )
-                        listOf(0.55f to "55%", 0.75f to "75%", 0.90f to "90%", 1.0f to "100%").forEach { (op, lbl) ->
-                            val selected = kotlin.math.abs(state.panelOpacity - op) < 0.04f
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (selected) ACCENT_BLUE else SURFACE_GRAY)
-                                    .clickable { onSetOpacity(op) }
-                                    .padding(horizontal = 9.dp, vertical = 4.dp)
-                            ) {
-                                BasicText(
-                                    text = lbl,
-                                    style = TextStyle(
-                                        color = if (selected) Color.White else TEXT_PRIMARY,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Dual input trigger row (读DOM + 截屏框选 + 剪贴板 + 清空)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val domLabel = if (state.domStatus == "抓取 DOM 中...") "抓取中..." else "读DOM"
-                    ActionPill(domLabel, ACCENT_SOFT, ACCENT_BLUE, Modifier.weight(1f), onCaptureDom)
-                    ActionPill("截屏框选", ACCENT_BLUE, Color.White, Modifier.weight(1.1f), onCaptureScreen)
-                    ActionPill("剪贴板", SURFACE_GRAY, TEXT_PRIMARY, Modifier.weight(0.85f), onPasteClipboard)
-                    ActionPill("清空", SURFACE_GRAY, TEXT_SECONDARY, Modifier.weight(0.65f), onClearChat)
-                }
-            }
-
-            // Compact context chips + quick actions strip
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFFAFAFC))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                if (state.contextText.isNotBlank()) {
-                    val baseLabel = OverlayPromptBuilder.quoteBadgeForStatus(state.domStatus)
-                    val quoteLabel = OverlayPromptBuilder.formatQuoteBadge(
-                        baseLabel = baseLabel,
-                        questionCount = state.domQuestionCount,
-                        imageCount = state.domImageCount
-                    )
-                    QuoteReferenceBlock(
-                        label = quoteLabel,
-                        containerBg = ACCENT_SOFT,
-                        barColor = ACCENT_BLUE,
-                        barWidth = 3.dp,
-                        textColor = ACCENT_BLUE,
-                        verticalPadding = 4.dp,
-                        onClick = onToggleContextPreview,
-                        trailing = {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                CompactActionPill(
-                                    label = if (state.isContextPreviewExpanded) "收起" else "预览",
-                                    textColor = ACCENT_BLUE,
-                                    onClick = onToggleContextPreview
-                                )
-                                CompactRemoveButton(onClick = onClearContext)
-                            }
-                        }
-                    )
-
-                    AnimatedVisibility(visible = state.isContextPreviewExpanded) {
-                        ContextPreviewCard(
-                            state = state,
-                            onSelectContextSource = onSelectContextSource,
-                            onToggleQuestionIndex = onToggleQuestionIndex,
-                            onSelectAllQuestions = onSelectAllQuestions,
-                            onToggleDomImageIncluded = onToggleDomImageIncluded
-                        )
-                    }
-                }
-
-                if (state.warningText.isNotBlank()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFFFEF3C7))
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        BasicText(
-                            text = state.warningText,
-                            style = TextStyle(color = Color(0xFF92400E), fontSize = 11.sp, lineHeight = 16.sp),
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (state.hasObfuscatedFont) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFFD97706))
-                                    .clickable(onClick = onCaptureScreen)
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                BasicText(
-                                    text = "截屏框选",
-                                    style = TextStyle(
-                                        color = Color.White,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (state.attachedImage != null) {
-                    val bmp = state.attachedImage
-                    val imgBitmap = remember(bmp) { bmp.asImageBitmap() }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(SURFACE_GRAY)
-                            .padding(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Image(
-                            bitmap = imgBitmap,
-                            contentDescription = "Crop preview",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(width = 76.dp, height = 48.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            BasicText(
-                                text = "已附加截图 ${bmp.width}×${bmp.height}",
-                                style = TextStyle(color = TEXT_PRIMARY, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                            )
-                            BasicText(
-                                text = "将随本次提问发送给 AI",
-                                style = TextStyle(color = TEXT_SECONDARY, fontSize = 11.sp)
-                            )
-                        }
-                        CompactRemoveButton(onClick = onRemoveAttachedImage)
-                    }
-                }
-
-                // Quick prompt chips
-                Row(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .height(1.dp)
+                        .background(palette.borderSubtle)
+                )
+
+                // Chat stream
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    QuickChip("查题库") {
-                        onSearchTikuOnly()
-                    }
-                    QuickChip("直接解题") {
-                        onQuickAction("直接解题", "请先给出速查答案，再给出简洁清晰的解析步骤：")
-                    }
-                    QuickChip("总结要点") {
-                        onQuickAction("总结要点", "请提取并条理化总结以下内容的核心要点：")
-                    }
-                    QuickChip("准确翻译") {
-                        onQuickAction("准确翻译", "请将以下内容准确翻译为中文：")
-                    }
-                    QuickChip("仅发原文") {
-                        onQuickAction("仅发原文", "")
-                    }
-                }
-            }
-
-            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(BORDER_SUBTLE))
-
-            // Chat stream
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (state.messages.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(SURFACE_GRAY)
-                                .padding(12.dp)
-                        ) {
-                            BasicText(
-                                text = "点上方「读DOM」或「截屏框选」开始提问",
-                                style = TextStyle(color = TEXT_SECONDARY, fontSize = 12.sp, lineHeight = 18.sp)
-                            )
-                        }
-                    }
-                }
-
-                items(state.messages, key = { it.id }) { msg ->
-                    val isUser = msg.role == "user"
-                    val isLastAssistant = !isUser && msg.id == state.messages.lastOrNull()?.id
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth(if (isUser) 0.88f else 1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(if (isUser) ACCENT_BLUE else SURFACE_GRAY)
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            if (isUser && msg.contextBadge.isNotBlank()) {
-                                QuoteReferenceBlock(
-                                    label = msg.contextBadge,
-                                    containerBg = Color(0x29FFFFFF),
-                                    barColor = Color.White,
-                                    barWidth = 2.5.dp,
-                                    textColor = Color.White,
-                                    verticalPadding = 5.dp
-                                )
-                            }
-                            if (msg.imagePreview != null) {
-                                val bmp = msg.imagePreview
-                                val img = remember(bmp) { bmp.asImageBitmap() }
-                                Image(
-                                    bitmap = img,
-                                    contentDescription = "Sent image",
-                                    contentScale = ContentScale.FillWidth,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(max = 120.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                )
-                            }
-                            if (isUser) {
-                                BasicText(
-                                    text = msg.content.ifBlank { "[仅发送图片]" },
-                                    style = TextStyle(color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
-                                )
-                            } else {
-                                MarkdownMessageView(
-                                    rawText = msg.content,
-                                    reasoningText = msg.reasoning,
-                                    isStreaming = msg.isStreaming,
-                                    textColor = TEXT_PRIMARY,
-                                    accentColor = ACCENT_BLUE,
-                                    onCopyCode = onCopyMessage,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-
-                        if (!isUser && !msg.isStreaming && msg.content.isNotBlank()) {
-                            Row(
-                                modifier = Modifier.padding(top = 4.dp, start = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    if (state.messages.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(palette.surfaceGray)
+                                    .padding(12.dp)
                             ) {
                                 BasicText(
-                                    text = "复制回答",
-                                    style = TextStyle(color = ACCENT_BLUE, fontSize = 11.sp, fontWeight = FontWeight.Medium),
-                                    modifier = Modifier.clickable { onCopyMessage(msg.content) }
-                                )
-                                if (isLastAssistant) {
-                                    BasicText(
-                                        text = "重新生成",
-                                        style = TextStyle(color = TEXT_SECONDARY, fontSize = 11.sp, fontWeight = FontWeight.Medium),
-                                        modifier = Modifier.clickable(onClick = onRegenerateLast)
+                                    text = "点上方「读DOM」或「截屏框选」开始提问",
+                                    style = TextStyle(
+                                        color = palette.textSecondary,
+                                        fontSize = 12.sp,
+                                        lineHeight = 18.sp
                                     )
+                                )
+                            }
+                        }
+                    }
+
+                    items(state.messages, key = { it.id }) { msg ->
+                        val isUser = msg.role == "user"
+                        val isLastAssistant = !isUser && msg.id == state.messages.lastOrNull()?.id
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth(if (isUser) 0.88f else 1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(if (isUser) palette.userBubbleBg else palette.assistantBubbleBg)
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (isUser && msg.contextBadge.isNotBlank()) {
+                                    QuoteReferenceBlock(
+                                        label = msg.contextBadge,
+                                        containerBg = Color(0x29FFFFFF),
+                                        barColor = Color.White,
+                                        barWidth = 2.5.dp,
+                                        textColor = Color.White,
+                                        verticalPadding = 5.dp
+                                    )
+                                }
+                                if (msg.imagePreview != null) {
+                                    val bmp = msg.imagePreview
+                                    val img = remember(bmp) { bmp.asImageBitmap() }
+                                    Image(
+                                        bitmap = img,
+                                        contentDescription = "Sent image",
+                                        contentScale = ContentScale.FillWidth,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 120.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                    )
+                                }
+                                if (isUser) {
+                                    BasicText(
+                                        text = msg.content.ifBlank { "[仅发送图片]" },
+                                        style = TextStyle(color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
+                                    )
+                                } else {
+                                    MarkdownMessageView(
+                                        rawText = msg.content,
+                                        reasoningText = msg.reasoning,
+                                        isStreaming = msg.isStreaming,
+                                        textColor = palette.textPrimary,
+                                        accentColor = palette.accent,
+                                        onCopyCode = onCopyMessage,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        isDark = state.isDark
+                                    )
+                                }
+                            }
+
+                            if (!isUser && !msg.isStreaming && msg.content.isNotBlank()) {
+                                Row(
+                                    modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    BasicText(
+                                        text = "复制回答",
+                                        style = TextStyle(
+                                            color = palette.accent,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        ),
+                                        modifier = Modifier.clickable { onCopyMessage(msg.content) }
+                                    )
+                                    if (isLastAssistant) {
+                                        BasicText(
+                                            text = "重新生成",
+                                            style = TextStyle(
+                                                color = palette.textSecondary,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium
+                                            ),
+                                            modifier = Modifier.clickable(onClick = onRegenerateLast)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // Bottom prompt bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFF9FAFB))
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
+                // Bottom prompt bar
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(SURFACE_GRAY)
-                        .padding(horizontal = 12.dp, vertical = 9.dp)
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                awaitFirstDown(requireUnconsumed = false)
-                                onRequestImeFocus(promptFocusRequester)
-                            }
-                        }
+                        .fillMaxWidth()
+                        .background(palette.headerBg)
+                        .padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (state.draftPrompt.isEmpty()) {
-                        BasicText(
-                            text = "输入追问，或留空直接发送上下文/截图...",
-                            style = TextStyle(color = Color(0xFF9CA3AF), fontSize = 13.sp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(palette.surfaceGray)
+                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    onRequestImeFocus(promptFocusRequester)
+                                }
+                            }
+                    ) {
+                        if (state.draftPrompt.isEmpty()) {
+                            BasicText(
+                                text = "输入追问，或留空直接发送上下文/截图...",
+                                style = TextStyle(color = palette.placeholderText, fontSize = 13.sp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = state.draftPrompt,
+                            onValueChange = onDraftChange,
+                            textStyle = TextStyle(
+                                color = palette.textPrimary,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp
+                            ),
+                            cursorBrush = SolidColor(palette.accent),
+                            maxLines = 3,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { if (!state.isGenerating) onSendOrStop() }),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(promptFocusRequester)
                         )
                     }
-                    BasicTextField(
-                        value = state.draftPrompt,
-                        onValueChange = onDraftChange,
-                        textStyle = TextStyle(color = TEXT_PRIMARY, fontSize = 13.sp, lineHeight = 18.sp),
-                        cursorBrush = SolidColor(ACCENT_BLUE),
-                        maxLines = 3,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { if (!state.isGenerating) onSendOrStop() }),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(promptFocusRequester)
-                    )
-                }
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (state.isGenerating) Color(0xFFEF4444) else ACCENT_BLUE)
-                        .clickable(onClick = onSendOrStop)
-                        .padding(horizontal = 14.dp, vertical = 9.dp)
-                ) {
-                    BasicText(
-                        text = if (state.isGenerating) "停止" else "发送",
-                        style = TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (state.isGenerating) palette.danger else palette.accent)
+                            .clickable(onClick = onSendOrStop)
+                            .padding(horizontal = 14.dp, vertical = 9.dp)
+                    ) {
+                        BasicText(
+                            text = if (state.isGenerating) "停止" else "发送",
+                            style = TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        )
+                    }
+                }
+            }
+
+            val gripColor = palette.resizeGrip.copy(alpha = palette.resizeGrip.alpha * state.panelOpacity)
+
+            // Bottom-Right resize grip
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(24.dp)
+                    .rawScreenDrag(
+                        useTouchSlop = false,
+                        onDelta = { dx, dy -> onResizeDelta(ResizeEdge.BOTTOM_RIGHT, dx, dy) },
+                        onEnd = onResizeEnd
+                    )
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val path = Path().apply {
+                        moveTo(17.dp.toPx(), 8.dp.toPx())
+                        lineTo(17.dp.toPx(), 13.5.dp.toPx())
+                        quadraticTo(17.dp.toPx(), 17.dp.toPx(), 13.5.dp.toPx(), 17.dp.toPx())
+                        lineTo(8.dp.toPx(), 17.dp.toPx())
+                    }
+                    drawPath(
+                        path = path,
+                        color = gripColor,
+                        style = Stroke(
+                            width = 1.8.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
                     )
                 }
             }
+
+            // Bottom-Left resize grip
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .size(24.dp)
+                    .rawScreenDrag(
+                        useTouchSlop = false,
+                        onDelta = { dx, dy -> onResizeDelta(ResizeEdge.BOTTOM_LEFT, dx, dy) },
+                        onEnd = onResizeEnd
+                    )
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val path = Path().apply {
+                        moveTo(7.dp.toPx(), 8.dp.toPx())
+                        lineTo(7.dp.toPx(), 13.5.dp.toPx())
+                        quadraticTo(7.dp.toPx(), 17.dp.toPx(), 10.5.dp.toPx(), 17.dp.toPx())
+                        lineTo(16.dp.toPx(), 17.dp.toPx())
+                    }
+                    drawPath(
+                        path = path,
+                        color = gripColor,
+                        style = Stroke(
+                            width = 1.8.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
+                    )
+                }
+            }
+
+            // Bottom-Center vertical resize grip
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp)
+                    .height(10.dp)
+                    .rawScreenDrag(
+                        useTouchSlop = false,
+                        onDelta = { _, dy -> onResizeDelta(ResizeEdge.BOTTOM, 0, dy) },
+                        onEnd = onResizeEnd
+                    )
+            )
         }
     }
 }
@@ -893,17 +1212,18 @@ private fun SmallHeaderIconButton(
     label: String,
     onClick: () -> Unit
 ) {
+    val palette = LocalOverlayPalette.current
     Box(
         modifier = Modifier
             .size(26.dp)
             .clip(CircleShape)
-            .background(Color(0xFFECEFF4))
+            .background(palette.chipBg)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         BasicText(
             text = label,
-            style = TextStyle(color = TEXT_PRIMARY, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            style = TextStyle(color = palette.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         )
     }
 }
@@ -968,12 +1288,13 @@ private fun ContextPreviewCard(
     onSelectAllQuestions: () -> Unit,
     onToggleDomImageIncluded: (Int) -> Unit
 ) {
+    val palette = LocalOverlayPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(SURFACE_GRAY)
-            .border(1.dp, BORDER_SUBTLE, RoundedCornerShape(10.dp))
+            .background(palette.surfaceGray)
+            .border(1.dp, palette.borderSubtle, RoundedCornerShape(10.dp))
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -1046,7 +1367,7 @@ private fun ContextPreviewCard(
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
             style = TextStyle(
-                color = TEXT_SECONDARY,
+                color = palette.textSecondary,
                 fontSize = 11.sp,
                 lineHeight = 15.sp
             )
@@ -1060,13 +1381,14 @@ private fun PreviewFilterChip(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val palette = LocalOverlayPalette.current
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(if (selected) ACCENT_BLUE else Color.White)
+            .background(if (selected) palette.accent else palette.chipInnerBg)
             .border(
                 width = 1.dp,
-                color = if (selected) ACCENT_BLUE else BORDER_SUBTLE,
+                color = if (selected) palette.accent else palette.borderSubtle,
                 shape = RoundedCornerShape(10.dp)
             )
             .clickable(onClick = onClick)
@@ -1075,7 +1397,7 @@ private fun PreviewFilterChip(
         BasicText(
             text = label,
             style = TextStyle(
-                color = if (selected) Color.White else TEXT_PRIMARY,
+                color = if (selected) Color.White else palette.textPrimary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium
             )
@@ -1088,6 +1410,7 @@ private fun DomImageThumbnailCard(
     item: DomImagePreviewItem,
     onClick: () -> Unit
 ) {
+    val palette = LocalOverlayPalette.current
     val badgeText = item.label.ifBlank {
         if (item.isFormula) "公式${item.index}" else "图${item.index}"
     }
@@ -1095,15 +1418,16 @@ private fun DomImageThumbnailCard(
         modifier = Modifier
             .width(56.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(Color.White)
+            .background(palette.chipInnerBg)
             .border(
                 width = if (item.included) 1.5.dp else 1.dp,
-                color = if (item.included) ACCENT_BLUE else BORDER_SUBTLE,
+                color = if (item.included) palette.accent else palette.borderSubtle,
                 shape = RoundedCornerShape(8.dp)
             )
             .clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Keep formula container background white so black-ink transparent PNGs remain legible in dark mode.
         Box(
             modifier = Modifier
                 .size(width = 56.dp, height = 44.dp)
@@ -1126,7 +1450,7 @@ private fun DomImageThumbnailCard(
                 BasicText(
                     text = if (item.isFormula) "公式" else "图片",
                     style = TextStyle(
-                        color = TEXT_SECONDARY,
+                        color = Color(0xFF6B7280),
                         fontSize = 10.sp
                     ),
                     modifier = Modifier.alpha(if (item.included) 1f else 0.45f)
@@ -1136,7 +1460,7 @@ private fun DomImageThumbnailCard(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xB3111827))
+                        .background(palette.excludedOverlayBg)
                         .padding(horizontal = 4.dp, vertical = 1.dp)
                 ) {
                     BasicText(
@@ -1153,7 +1477,7 @@ private fun DomImageThumbnailCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(if (item.included) ACCENT_SOFT else Color(0xFFE5E7EB))
+                .background(if (item.included) palette.accentSoft else palette.chipBg)
                 .padding(horizontal = 3.dp, vertical = 2.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -1162,7 +1486,7 @@ private fun DomImageThumbnailCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = TextStyle(
-                    color = if (item.included) ACCENT_BLUE else TEXT_SECONDARY,
+                    color = if (item.included) palette.accent else palette.textSecondary,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Medium
                 )
@@ -1177,10 +1501,11 @@ private fun CompactActionPill(
     textColor: Color,
     onClick: () -> Unit
 ) {
+    val palette = LocalOverlayPalette.current
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(Color.White)
+            .background(palette.chipInnerBg)
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
@@ -1193,9 +1518,10 @@ private fun CompactActionPill(
 
 @Composable
 private fun CompactRemoveButton(onClick: () -> Unit) {
+    val palette = LocalOverlayPalette.current
     CompactActionPill(
         label = "移除",
-        textColor = Color(0xFFDC2626),
+        textColor = palette.dangerText,
         onClick = onClick
     )
 }
@@ -1225,16 +1551,17 @@ private fun ActionPill(
 
 @Composable
 private fun QuickChip(label: String, onClick: () -> Unit) {
+    val palette = LocalOverlayPalette.current
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(14.dp))
-            .background(ACCENT_SOFT)
+            .background(palette.accentSoft)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         BasicText(
             text = label,
-            style = TextStyle(color = ACCENT_BLUE, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            style = TextStyle(color = palette.accent, fontSize = 11.sp, fontWeight = FontWeight.Medium)
         )
     }
 }

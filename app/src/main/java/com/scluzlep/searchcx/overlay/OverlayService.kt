@@ -11,6 +11,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.os.Build
@@ -43,6 +44,10 @@ import com.scluzlep.searchcx.data.DomContextSource
 import com.scluzlep.searchcx.data.DomImageItem
 import com.scluzlep.searchcx.data.DomQuizItem
 import com.scluzlep.searchcx.data.DomSnapshot
+import com.scluzlep.searchcx.data.OverlayPrefs
+import com.scluzlep.searchcx.data.OverlayThemeMode
+import com.scluzlep.searchcx.data.OverlayWindowGeometry
+import com.scluzlep.searchcx.data.WindowBoundsPx
 import com.scluzlep.searchcx.ipc.DomIpcContract
 import com.scluzlep.searchcx.ipc.DomSnapshotBus
 import com.scluzlep.searchcx.ipc.DomSnapshotReceiver
@@ -74,6 +79,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class OverlayService : Service() {
 
@@ -179,11 +185,19 @@ class OverlayService : Service() {
             }
             ACTION_REFRESH_CONFIG -> {
                 syncStateFromConfig()
+                val dm = resources.displayMetrics
+                val prefs = configStore.load().overlayPrefs
+                applyPanelBounds(
+                    OverlayWindowGeometry.resolvePanelBounds(
+                        prefs = prefs,
+                        screenW = dm.widthPixels,
+                        screenH = dm.heightPixels,
+                        density = dm.density
+                    )
+                )
                 applyPanelWindowFlags()
+                reclampBallParams(prefs)
                 applyBallWindowFlags()
-                if (!isExpanded && ballView?.parent != null) {
-                    snapBallToEdge(uiState.ballDockRight)
-                }
             }
             ACTION_MEDIA_PROJECTION_GRANTED -> {
                 val code = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
@@ -234,6 +248,30 @@ class OverlayService : Service() {
         super.onDestroy()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val prefs = configStore.load().overlayPrefs
+        val nextIsDark = when (prefs.themeMode) {
+            OverlayThemeMode.FOLLOW_SYSTEM ->
+                (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            OverlayThemeMode.LIGHT -> false
+            OverlayThemeMode.DARK -> true
+        }
+        if (uiState.isDark != nextIsDark || uiState.themeMode != prefs.themeMode) {
+            uiState = uiState.copy(isDark = nextIsDark, themeMode = prefs.themeMode)
+        }
+        val dm = resources.displayMetrics
+        applyPanelBounds(
+            OverlayWindowGeometry.resolvePanelBounds(
+                prefs = prefs,
+                screenW = dm.widthPixels,
+                screenH = dm.heightPixels,
+                density = dm.density
+            )
+        )
+        reclampBallParams(prefs)
+    }
+
     private fun startAsForegroundService(includeMediaProjection: Boolean) {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
@@ -269,6 +307,14 @@ class OverlayService : Service() {
         }
     }
 
+    private fun resolveIsDark(themeMode: OverlayThemeMode): Boolean = when (themeMode) {
+        OverlayThemeMode.LIGHT -> false
+        OverlayThemeMode.DARK -> true
+        OverlayThemeMode.FOLLOW_SYSTEM ->
+            (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+    }
+
     private fun syncStateFromConfig() {
         val cfg = configStore.load()
         val active = cfg.activeProfile()
@@ -280,6 +326,9 @@ class OverlayService : Service() {
             activeModel = active.model,
             panelOpacity = prefs.panelOpacity,
             isTallMode = prefs.panelExpandedTall,
+            isDark = resolveIsDark(prefs.themeMode),
+            themeMode = prefs.themeMode,
+            ballDocked = prefs.ballDocked,
             ballDockRight = prefs.ballDockRight,
             collapsedBallStyle = prefs.collapsedBallStyle
         )
@@ -291,6 +340,10 @@ class OverlayService : Service() {
         val prefs = configStore.load().overlayPrefs
 
         val view = ComposeView(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            elevation = 0f
+            outlineProvider = null
+            clipToOutline = false
             owner.attachToView(this)
             setContent {
                 FloatingBallComposable(state = uiState)
@@ -306,15 +359,29 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = if (prefs.ballDockRight) (dm.widthPixels - approxBallW).coerceAtLeast(0) else 0
-            y = (dm.heightPixels * prefs.ballYFraction).toInt().coerceIn(dpToPx(64), dm.heightPixels - dpToPx(140))
+            x = resolveBallX(prefs, approxBallW, dm.widthPixels)
+            y = resolveBallY(prefs, approxBallW, dm.heightPixels)
+            dimAmount = 0f
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                blurBehindRadius = 0
+            }
         }
 
         view.addOnLayoutChangeListener { v, left, _, right, _, oldLeft, _, oldRight, _ ->
             val newW = right - left
             val oldW = oldRight - oldLeft
             if (newW > 0 && newW != oldW && !isDraggingBall && !isExpanded && v.parent != null) {
-                v.post { snapBallToEdge(uiState.ballDockRight, newW) }
+                v.post {
+                    if (uiState.ballDocked) {
+                        snapBallToEdge(uiState.ballDockRight, newW)
+                    } else {
+                        applyBallPositionForState(
+                            prefs = configStore.load().overlayPrefs,
+                            measuredWidth = newW,
+                            measuredHeight = v.height
+                        )
+                    }
+                }
             }
         }
 
@@ -356,8 +423,14 @@ class OverlayService : Service() {
                         isDraggingBall = true
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
-                    ballParams.x = startX + dx
-                    ballParams.y = (startY + dy).coerceIn(dpToPx(36), dm.heightPixels - dpToPx(96))
+                    val metrics = resources.displayMetrics
+                    val ballW = if (v.width > 0) v.width else defaultBallWidthPx(uiState.collapsedBallStyle)
+                    val ballH = if (v.height > 0) v.height else ballW
+                    val maxX = (metrics.widthPixels - ballW).coerceAtLeast(0)
+                    val minY = dpToPx(36)
+                    val maxY = (metrics.heightPixels - ballH.coerceAtLeast(dpToPx(64))).coerceAtLeast(minY)
+                    ballParams.x = (startX + dx).coerceIn(0, maxX)
+                    ballParams.y = (startY + dy).coerceIn(minY, maxY)
                     runCatching { windowManager.updateViewLayout(v, ballParams) }
                     true
                 }
@@ -367,16 +440,42 @@ class OverlayService : Service() {
                     if (!moved && !longPressed && event.actionMasked == MotionEvent.ACTION_UP) {
                         expandPanel(autoCaptureDom = configStore.load().overlayPrefs.autoCaptureOnExpand)
                     } else if (moved) {
-                        val midX = ballParams.x + v.width / 2
-                        val dockRight = midX >= dm.widthPixels / 2
-                        val frac = (ballParams.y.toFloat() / dm.heightPixels.toFloat()).coerceIn(0.08f, 0.85f)
-                        configStore.updateOverlayPrefs {
-                            it.copy(ballDockRight = dockRight, ballYFraction = frac)
+                        val metrics = resources.displayMetrics
+                        val ballW = if (v.width > 0) v.width else defaultBallWidthPx(uiState.collapsedBallStyle)
+                        val yFrac = (ballParams.y.toFloat() / metrics.heightPixels.toFloat()).coerceIn(0.08f, 0.85f)
+                        val shouldSnap = OverlayWindowGeometry.shouldSnapBallToEdge(
+                            ballX = ballParams.x,
+                            ballW = ballW,
+                            screenW = metrics.widthPixels,
+                            density = metrics.density
+                        )
+                        if (shouldSnap) {
+                            val midX = ballParams.x + ballW / 2
+                            val dockRight = midX >= metrics.widthPixels / 2
+                            configStore.updateOverlayPrefs {
+                                it.copy(
+                                    ballDocked = true,
+                                    ballDockRight = dockRight,
+                                    ballXFraction = OverlayPrefs.UNSET_FRACTION,
+                                    ballYFraction = yFrac
+                                )
+                            }
+                            uiState = uiState.copy(ballDocked = true, ballDockRight = dockRight)
+                            snapBallToEdge(dockRight, ballW)
+                            scheduleIdleRetract()
+                        } else {
+                            val xFrac = (ballParams.x.toFloat() / metrics.widthPixels.toFloat()).coerceIn(0f, 0.98f)
+                            configStore.updateOverlayPrefs {
+                                it.copy(
+                                    ballDocked = false,
+                                    ballXFraction = xFrac,
+                                    ballYFraction = yFrac
+                                )
+                            }
+                            uiState = uiState.copy(ballDocked = false, ballIdleRetracted = false)
+                            idleRetractJob?.cancel()
                         }
-                        uiState = uiState.copy(ballDockRight = dockRight)
-                        snapBallToEdge(dockRight, v.width)
-                        scheduleIdleRetract()
-                    } else {
+                    } else if (uiState.ballDocked) {
                         scheduleIdleRetract()
                     }
                     true
@@ -392,10 +491,19 @@ class OverlayService : Service() {
     private fun initFloatingPanel() {
         val owner = OverlayLifecycleOwner()
         val dm = resources.displayMetrics
-        val panelW = (dm.widthPixels * 0.93f).toInt().coerceAtMost(dpToPx(410))
-        val panelH = computePanelHeightPx(uiState.isTallMode)
+        val prefs = configStore.load().overlayPrefs
+        val initialBounds = OverlayWindowGeometry.resolvePanelBounds(
+            prefs = prefs,
+            screenW = dm.widthPixels,
+            screenH = dm.heightPixels,
+            density = dm.density
+        )
 
         val view = ComposeView(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            elevation = 0f
+            outlineProvider = null
+            clipToOutline = false
             owner.attachToView(this)
             setContent {
                 CompositionLocalProvider(LocalUriHandler provides overlayUriHandler) {
@@ -403,9 +511,22 @@ class OverlayService : Service() {
                         state = uiState,
                         promptFocusRequester = promptFocusRequester,
                         onDragDelta = { dx, dy ->
-                            panelParams.x = (panelParams.x + dx).coerceIn(-dm.widthPixels / 3, dm.widthPixels - dpToPx(80))
-                            panelParams.y = (panelParams.y + dy).coerceIn(0, dm.heightPixels - dpToPx(120))
-                            panelView?.let { pv -> runCatching { windowManager.updateViewLayout(pv, panelParams) } }
+                            val metrics = resources.displayMetrics
+                            val current = WindowBoundsPx(
+                                x = panelParams.x,
+                                y = panelParams.y,
+                                width = panelParams.width,
+                                height = panelParams.height
+                            )
+                            val next = OverlayWindowGeometry.applyPanelDrag(
+                                bounds = current,
+                                dx = dx,
+                                dy = dy,
+                                screenW = metrics.widthPixels,
+                                screenH = metrics.heightPixels,
+                                density = metrics.density
+                            )
+                            applyPanelBounds(next)
                         },
                         onSelectProfile = { profileId ->
                             val cfg = configStore.load()
@@ -444,7 +565,30 @@ class OverlayService : Service() {
                         onSelectContextSource = { source -> selectContextSource(source) },
                         onToggleQuestionIndex = { idx -> toggleQuestionIndex(idx) },
                         onSelectAllQuestions = { selectAllQuestions() },
-                        onToggleDomImageIncluded = { idx -> toggleDomImageIncluded(idx) }
+                        onToggleDomImageIncluded = { idx -> toggleDomImageIncluded(idx) },
+                        onDragEnd = { persistPanelPosition() },
+                        onResizeDelta = { edge, dx, dy ->
+                            val metrics = resources.displayMetrics
+                            val current = WindowBoundsPx(
+                                x = panelParams.x,
+                                y = panelParams.y,
+                                width = panelParams.width,
+                                height = panelParams.height
+                            )
+                            val next = OverlayWindowGeometry.applyPanelResize(
+                                bounds = current,
+                                edge = edge,
+                                dx = dx,
+                                dy = dy,
+                                screenW = metrics.widthPixels,
+                                screenH = metrics.heightPixels,
+                                density = metrics.density
+                            )
+                            applyPanelBounds(next)
+                        },
+                        onResizeEnd = { persistPanelBounds() },
+                        onSetThemeMode = { mode -> setOverlayThemeMode(mode) },
+                        onResetWindowBounds = { resetWindowBounds() }
                     )
                 }
             }
@@ -458,15 +602,19 @@ class OverlayService : Service() {
         }
 
         panelParams = WindowManager.LayoutParams(
-            panelW,
-            panelH,
+            initialBounds.width,
+            initialBounds.height,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             buildPanelWindowFlags(focusable = false),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = ((dm.widthPixels - panelW) / 2).coerceAtLeast(0)
-            y = dpToPx(56)
+            x = initialBounds.x
+            y = initialBounds.y
+            dimAmount = 0f
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                blurBehindRadius = 0
+            }
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
 
@@ -474,18 +622,83 @@ class OverlayService : Service() {
         panelOwner = owner
     }
 
-    private fun computePanelHeightPx(tall: Boolean): Int {
-        val h = resources.displayMetrics.heightPixels
-        val ratio = if (tall) 0.74f else 0.50f
-        return (h * ratio).toInt().coerceAtLeast(dpToPx(340))
+    private fun applyPanelBounds(bounds: WindowBoundsPx) {
+        panelParams.x = bounds.x
+        panelParams.y = bounds.y
+        panelParams.width = bounds.width
+        panelParams.height = bounds.height
+        panelView?.let { pv ->
+            if (pv.parent != null) {
+                runCatching { windowManager.updateViewLayout(pv, panelParams) }
+            }
+        }
+    }
+
+    private fun persistPanelPosition() {
+        val dm = resources.displayMetrics
+        if (dm.widthPixels <= 0 || dm.heightPixels <= 0) return
+        val xFrac = (panelParams.x.toFloat() / dm.widthPixels.toFloat()).coerceIn(-0.95f, 0.98f)
+        val yFrac = (panelParams.y.toFloat() / dm.heightPixels.toFloat()).coerceIn(0f, 0.96f)
+        configStore.updateOverlayPrefs {
+            it.copy(panelXFraction = xFrac, panelYFraction = yFrac)
+        }
+    }
+
+    private fun persistPanelBounds() {
+        val dm = resources.displayMetrics
+        if (dm.widthPixels <= 0 || dm.heightPixels <= 0 || dm.density <= 0f) return
+        val xFrac = (panelParams.x.toFloat() / dm.widthPixels.toFloat()).coerceIn(-0.95f, 0.98f)
+        val yFrac = (panelParams.y.toFloat() / dm.heightPixels.toFloat()).coerceIn(0f, 0.96f)
+        val widthDp = (panelParams.width / dm.density).roundToInt().coerceIn(220, 1400)
+        val heightDp = (panelParams.height / dm.density).roundToInt().coerceIn(220, 1800)
+        configStore.updateOverlayPrefs {
+            it.copy(
+                panelXFraction = xFrac,
+                panelYFraction = yFrac,
+                panelWidthDp = widthDp,
+                panelHeightDp = heightDp
+            )
+        }
+    }
+
+    private fun resetWindowBounds() {
+        val dm = resources.displayMetrics
+        val resetPrefs = configStore.updateOverlayPrefs { it.withResetWindowBounds() }
+        uiState = uiState.copy(isTallMode = false)
+        val resolved = OverlayWindowGeometry.resolvePanelBounds(
+            prefs = resetPrefs,
+            screenW = dm.widthPixels,
+            screenH = dm.heightPixels,
+            density = dm.density
+        )
+        applyPanelBounds(resolved)
+    }
+
+    private fun setOverlayThemeMode(mode: OverlayThemeMode) {
+        configStore.updateOverlayPrefs { it.copy(themeMode = mode) }
+        uiState = uiState.copy(
+            themeMode = mode,
+            isDark = resolveIsDark(mode)
+        )
     }
 
     private fun togglePanelHeight() {
+        val dm = resources.displayMetrics
         val nextTall = !uiState.isTallMode
-        configStore.updateOverlayPrefs { it.copy(panelExpandedTall = nextTall) }
+        configStore.updateOverlayPrefs {
+            it.copy(panelExpandedTall = nextTall, panelHeightDp = 0)
+        }
         uiState = uiState.copy(isTallMode = nextTall)
-        panelParams.height = computePanelHeightPx(nextTall)
-        panelView?.let { if (it.parent != null) runCatching { windowManager.updateViewLayout(it, panelParams) } }
+        val nextH = OverlayWindowGeometry.defaultPanelHeightPx(dm.heightPixels, dm.density, nextTall)
+        val nextY = OverlayWindowGeometry.clampPanelY(panelParams.y, nextH, dm.heightPixels, dm.density)
+        applyPanelBounds(
+            WindowBoundsPx(
+                x = panelParams.x,
+                y = nextY,
+                width = panelParams.width,
+                height = nextH
+            )
+        )
     }
 
     private fun buildBallWindowFlags(): Int {
@@ -503,7 +716,61 @@ class OverlayService : Service() {
     }
 
     private fun defaultBallWidthPx(style: CollapsedBallStyle): Int =
-        dpToPx(if (style == CollapsedBallStyle.MINI_DOT) 34 else 54)
+        dpToPx(if (style == CollapsedBallStyle.MINI_DOT) 40 else 54)
+
+    private fun resolveBallX(prefs: OverlayPrefs, ballW: Int, screenW: Int): Int {
+        val maxX = (screenW - ballW).coerceAtLeast(0)
+        return if (!prefs.ballDocked && prefs.ballXFraction > -5f) {
+            (prefs.ballXFraction * screenW).toInt().coerceIn(0, maxX)
+        } else if (prefs.ballDockRight) {
+            maxX
+        } else {
+            0
+        }
+    }
+
+    private fun resolveBallY(prefs: OverlayPrefs, ballH: Int, screenH: Int): Int {
+        val minY = dpToPx(36)
+        val maxY = (screenH - ballH.coerceAtLeast(dpToPx(64))).coerceAtLeast(minY)
+        return (screenH * prefs.ballYFraction).toInt().coerceIn(minY, maxY)
+    }
+
+    private fun applyBallPositionForState(
+        prefs: OverlayPrefs,
+        measuredWidth: Int? = null,
+        measuredHeight: Int? = null
+    ) {
+        val dm = resources.displayMetrics
+        val ballW = when {
+            measuredWidth != null && measuredWidth > 0 -> measuredWidth
+            (ballView?.width ?: 0) > 0 -> ballView!!.width
+            else -> defaultBallWidthPx(prefs.collapsedBallStyle)
+        }
+        val ballH = when {
+            measuredHeight != null && measuredHeight > 0 -> measuredHeight
+            (ballView?.height ?: 0) > 0 -> ballView!!.height
+            else -> ballW
+        }
+        ballParams.x = resolveBallX(prefs, ballW, dm.widthPixels)
+        ballParams.y = resolveBallY(prefs, ballH, dm.heightPixels)
+        ballView?.let { bv ->
+            if (bv.parent != null) {
+                runCatching { windowManager.updateViewLayout(bv, ballParams) }
+            }
+        }
+    }
+
+    private fun reclampBallParams(prefs: OverlayPrefs) {
+        if (!isExpanded) {
+            applyBallPositionForState(prefs)
+            if (prefs.ballDocked) {
+                scheduleIdleRetract()
+            } else {
+                idleRetractJob?.cancel()
+                uiState = uiState.copy(ballIdleRetracted = false)
+            }
+        }
+    }
 
     private fun snapBallToEdge(dockRight: Boolean, measuredWidth: Int? = null) {
         val dm = resources.displayMetrics
@@ -524,7 +791,9 @@ class OverlayService : Service() {
         var flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         if (!focusable) {
-            flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            flags = flags or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         }
         if (configStore.load().overlayPrefs.secureOverlay) {
             flags = flags or WindowManager.LayoutParams.FLAG_SECURE
@@ -569,24 +838,18 @@ class OverlayService : Service() {
         val latestPrefs = configStore.load().overlayPrefs
         uiState = uiState.copy(
             collapsedBallStyle = latestPrefs.collapsedBallStyle,
+            ballDocked = latestPrefs.ballDocked,
             ballDockRight = latestPrefs.ballDockRight,
             ballIdleRetracted = false
         )
         ballParams.flags = buildBallWindowFlags()
-        val expectedWidth = defaultBallWidthPx(latestPrefs.collapsedBallStyle)
-        ballParams.x = if (latestPrefs.ballDockRight) {
-            (resources.displayMetrics.widthPixels - expectedWidth).coerceAtLeast(0)
-        } else {
-            0
-        }
+        applyBallPositionForState(latestPrefs)
         if (ballView?.parent == null) {
             ballView?.let {
                 ballOwner?.onShown()
                 windowManager.addView(it, ballParams)
-                it.post { snapBallToEdge(latestPrefs.ballDockRight) }
+                it.post { applyBallPositionForState(latestPrefs, it.width, it.height) }
             }
-        } else {
-            snapBallToEdge(latestPrefs.ballDockRight)
         }
         isExpanded = false
         scheduleIdleRetract()
@@ -617,10 +880,10 @@ class OverlayService : Service() {
 
     private fun scheduleIdleRetract() {
         idleRetractJob?.cancel()
-        if (!configStore.load().overlayPrefs.idleEdgeRetract || isExpanded) return
+        if (!uiState.ballDocked || !configStore.load().overlayPrefs.idleEdgeRetract || isExpanded) return
         idleRetractJob = scope.launch {
             delay(3_000L)
-            if (!isExpanded && !uiState.isGenerating) {
+            if (!isExpanded && !uiState.isGenerating && uiState.ballDocked) {
                 uiState = uiState.copy(ballIdleRetracted = true)
             }
         }

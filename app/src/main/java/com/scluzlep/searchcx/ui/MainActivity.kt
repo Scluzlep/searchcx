@@ -14,30 +14,42 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -48,6 +60,7 @@ import com.scluzlep.searchcx.data.AppConfig
 import com.scluzlep.searchcx.data.AppConfigStore
 import com.scluzlep.searchcx.data.CollapsedBallStyle
 import com.scluzlep.searchcx.data.OverlayPrefs
+import com.scluzlep.searchcx.data.OverlayThemeMode
 import com.scluzlep.searchcx.data.ProviderProfile
 import com.scluzlep.searchcx.data.ProviderType
 import com.scluzlep.searchcx.net.LoopbackOAuthServer
@@ -308,6 +321,28 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
+
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = "悬浮窗外观",
+                                fontSize = 12.sp,
+                                color = Color(0xFF6B7280)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            ThemeModeSlider(
+                                selectedMode = prefs.themeMode,
+                                onSelectMode = { mode -> updateOverlayPrefs { copy(themeMode = mode) } }
+                            )
+
+                            Spacer(Modifier.height(10.dp))
+                            TextButton(
+                                text = "重置悬浮窗位置与大小",
+                                onClick = {
+                                    updateOverlayPrefs { withResetWindowBounds() }
+                                    setStatus("已重置悬浮窗位置与大小", COLOR_INFO)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
 
                         SmallTitle(
@@ -907,7 +942,7 @@ class MainActivity : ComponentActivity() {
         return fresh.copy(
             activeProfileId = updatedProfile.id,
             systemPrompt = editSystemPrompt.trim(),
-            overlayPrefs = config.overlayPrefs.copy(quickAskPrompt = editQuickPrompt.trim()),
+            overlayPrefs = fresh.overlayPrefs.copy(quickAskPrompt = editQuickPrompt.trim()),
             tikuConfig = buildTikuConfigFromDraft()
         ).withUpdatedProfile(updatedProfile)
     }
@@ -1373,6 +1408,136 @@ private fun TikuProviderChipRow(
                 selected = provider.id in selectedIds,
                 onClick = { onToggle(provider.id) }
             )
+        }
+    }
+}
+
+@Composable
+private fun ThemeModeSlider(
+    selectedMode: OverlayThemeMode,
+    onSelectMode: (OverlayThemeMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val modes = OverlayThemeMode.entries
+    val selectedIndex = modes.indexOf(selectedMode).coerceAtLeast(0)
+    val currentMode by rememberUpdatedState(selectedMode)
+    val currentOnSelect by rememberUpdatedState(onSelectMode)
+    var dragXFraction by remember { mutableStateOf<Float?>(null) }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFFE5E7EB))
+            .padding(3.dp)
+    ) {
+        val segmentWidth = maxWidth / modes.size
+        val density = LocalDensity.current
+        val innerWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
+        val activeFraction = dragXFraction
+        val displayedIndex = if (activeFraction != null) {
+            (activeFraction.coerceIn(0f, 0.9999f) * modes.size).toInt().coerceIn(0, modes.lastIndex)
+        } else {
+            selectedIndex
+        }
+        val maxOffset = (maxWidth - segmentWidth).coerceAtLeast(0.dp)
+        val targetOffset = if (activeFraction != null) {
+            ((maxWidth * activeFraction) - (segmentWidth / 2f)).coerceIn(0.dp, maxOffset)
+        } else {
+            segmentWidth * selectedIndex
+        }
+        val thumbOffset by animateDpAsState(
+            targetValue = targetOffset,
+            label = "theme_mode_slider_thumb"
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(modes.size, innerWidthPx) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val startPos = down.position
+                        var lastX = startPos.x
+                        var dragging = false
+                        var abortedForVerticalScroll = false
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                    ?: event.changes.firstOrNull()
+                                    ?: break
+
+                                if (!change.pressed) {
+                                    if (!abortedForVerticalScroll) {
+                                        val finalX = if (dragging) lastX else change.position.x
+                                        val targetIdx = ((finalX / innerWidthPx).coerceIn(0f, 0.9999f) * modes.size)
+                                            .toInt()
+                                            .coerceIn(0, modes.lastIndex)
+                                        val targetMode = modes[targetIdx]
+                                        if (targetMode != currentMode) {
+                                            currentOnSelect(targetMode)
+                                        }
+                                    }
+                                    break
+                                }
+
+                                if (!dragging && !abortedForVerticalScroll && change.isConsumed) {
+                                    abortedForVerticalScroll = true
+                                }
+
+                                val dx = change.position.x - startPos.x
+                                val dy = change.position.y - startPos.y
+                                if (!dragging && !abortedForVerticalScroll) {
+                                    val slop = viewConfiguration.touchSlop
+                                    if (kotlin.math.abs(dy) > slop && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
+                                        abortedForVerticalScroll = true
+                                    } else if (kotlin.math.abs(dx) > slop) {
+                                        dragging = true
+                                    }
+                                }
+
+                                if (dragging) {
+                                    lastX = change.position.x
+                                    dragXFraction = (lastX / innerWidthPx).coerceIn(0f, 1f)
+                                    change.consume()
+                                }
+                            }
+                        } finally {
+                            dragXFraction = null
+                        }
+                    }
+                }
+        ) {
+            Box(
+                modifier = Modifier
+                    .offset(x = thumbOffset)
+                    .width(segmentWidth)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(Color.White)
+                    .border(0.5.dp, Color(0x14000000), RoundedCornerShape(11.dp))
+            )
+            Row(modifier = Modifier.fillMaxSize()) {
+                modes.forEachIndexed { idx, mode ->
+                    val active = idx == displayedIndex
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.displayName,
+                            color = if (active) Color(0xFF3482FF) else Color(0xFF4B5563),
+                            fontSize = 12.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
         }
     }
 }
