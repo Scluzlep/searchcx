@@ -259,13 +259,16 @@ object OverlayWindowGeometry {
     }
 
     fun clampPanelX(x: Int, panelW: Int, screenW: Int, density: Float): Int {
-        val minVisible = (64f * density).toInt().coerceAtLeast(32)
-        return x.coerceIn(minVisible - panelW, (screenW - minVisible).coerceAtLeast(minVisible - panelW))
+        val maxOverhang = (16f * density).toInt().coerceAtLeast(0)
+        val minX = if (panelW <= screenW) -maxOverhang else screenW - panelW
+        val maxX = if (panelW <= screenW) screenW - panelW + maxOverhang else 0
+        return x.coerceIn(minOf(minX, maxX), maxOf(minX, maxX))
     }
 
     fun clampPanelY(y: Int, panelH: Int, screenH: Int, density: Float): Int {
-        val minVisible = (64f * density).toInt().coerceAtLeast(32)
-        return y.coerceIn(0, (screenH - minVisible).coerceAtLeast(0))
+        val minY = (24f * density).toInt().coerceAtLeast(0)
+        val maxY = (screenH - (120f * density).toInt()).coerceAtLeast(minY)
+        return y.coerceIn(minY, maxY)
     }
 
     fun resolvePanelBounds(

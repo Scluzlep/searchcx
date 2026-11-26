@@ -213,7 +213,7 @@ class OverlayPrefsTest {
 
         val restoredBounds = OverlayWindowGeometry.resolvePanelBounds(
             OverlayPrefs(
-                panelXFraction = -0.25f,
+                panelXFraction = 0.05f,
                 panelYFraction = 0.25f,
                 panelWidthDp = 320,
                 panelHeightDp = 400
@@ -224,22 +224,36 @@ class OverlayPrefsTest {
         )
         assertEquals(960, restoredBounds.width)
         assertEquals(1200, restoredBounds.height)
-        assertEquals(-270, restoredBounds.x)
+        assertEquals(54, restoredBounds.x)
         assertEquals(600, restoredBounds.y)
 
         val draggedLeft = OverlayWindowGeometry.applyPanelDrag(defaultBounds, -500, 300, screenW, screenH, density)
-        assertEquals(-462, draggedLeft.x)
+        assertEquals(-48, draggedLeft.x)
         assertEquals(468, draggedLeft.y)
         assertEquals(defaultBounds.width, draggedLeft.width)
         assertEquals(defaultBounds.height, draggedLeft.height)
 
         val draggedExtremeLeftUp = OverlayWindowGeometry.applyPanelDrag(defaultBounds, -2000, -500, screenW, screenH, density)
-        assertEquals(192 - defaultBounds.width, draggedExtremeLeftUp.x)
-        assertEquals(0, draggedExtremeLeftUp.y)
+        assertEquals(-48, draggedExtremeLeftUp.x)
+        assertEquals(72, draggedExtremeLeftUp.y)
 
         val draggedExtremeRightDown = OverlayWindowGeometry.applyPanelDrag(defaultBounds, 2000, 3000, screenW, screenH, density)
-        assertEquals(screenW - 192, draggedExtremeRightDown.x)
-        assertEquals(screenH - 192, draggedExtremeRightDown.y)
+        assertEquals(screenW - defaultBounds.width + 48, draggedExtremeRightDown.x)
+        assertEquals(screenH - 360, draggedExtremeRightDown.y)
+
+        val rescuedDrifted = OverlayWindowGeometry.resolvePanelBounds(
+            OverlayPrefs(
+                panelXFraction = -0.85f,
+                panelYFraction = 0.96f,
+                panelWidthDp = 320,
+                panelHeightDp = 400
+            ),
+            screenW,
+            screenH,
+            density
+        )
+        assertEquals(-48, rescuedDrifted.x)
+        assertEquals(screenH - 360, rescuedDrifted.y)
 
         val base = WindowBoundsPx(x = 120, y = 200, width = 880, height = 1000)
         val brShrunkMin = OverlayWindowGeometry.applyPanelResize(

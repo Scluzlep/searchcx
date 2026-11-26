@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
@@ -26,6 +27,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -47,6 +49,7 @@ import com.scluzlep.searchcx.data.DomSnapshot
 import com.scluzlep.searchcx.data.OverlayPrefs
 import com.scluzlep.searchcx.data.OverlayThemeMode
 import com.scluzlep.searchcx.data.OverlayWindowGeometry
+import com.scluzlep.searchcx.data.ResizeEdge
 import com.scluzlep.searchcx.data.WindowBoundsPx
 import com.scluzlep.searchcx.ipc.DomIpcContract
 import com.scluzlep.searchcx.ipc.DomSnapshotBus
@@ -79,6 +82,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 class OverlayService : Service() {
@@ -113,7 +117,8 @@ class OverlayService : Service() {
     private lateinit var ballParams: WindowManager.LayoutParams
     private var ballOwner: OverlayLifecycleOwner? = null
 
-    private var panelView: ComposeView? = null
+    private var panelView: PanelTouchContainer? = null
+    private var panelComposeView: ComposeView? = null
     private lateinit var panelParams: WindowManager.LayoutParams
     private var panelOwner: OverlayLifecycleOwner? = null
 
@@ -243,7 +248,10 @@ class OverlayService : Service() {
         screenCapture.release()
         dismissCropOverlay()
         removeWindowSafely(ballView, ballOwner)
+        ballView = null
         removeWindowSafely(panelView, panelOwner)
+        panelView = null
+        panelComposeView = null
         clearDomSessionState(resetUiState = true)
         super.onDestroy()
     }
@@ -386,6 +394,7 @@ class OverlayService : Service() {
         }
 
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        var activePointerId = MotionEvent.INVALID_POINTER_ID
         var startX = 0
         var startY = 0
         var downRawX = 0f
@@ -400,24 +409,79 @@ class OverlayService : Service() {
             }
         }
 
+        fun completeBallGesture(v: View, triggerClick: Boolean) {
+            isDraggingBall = false
+            activePointerId = MotionEvent.INVALID_POINTER_ID
+            mainHandler.removeCallbacks(longPressRunnable)
+            if (!moved && !longPressed && triggerClick) {
+                expandPanel(autoCaptureDom = configStore.load().overlayPrefs.autoCaptureOnExpand)
+            } else if (moved) {
+                val metrics = resources.displayMetrics
+                val ballW = if (v.width > 0) v.width else defaultBallWidthPx(uiState.collapsedBallStyle)
+                val yFrac = (ballParams.y.toFloat() / metrics.heightPixels.toFloat()).coerceIn(0.08f, 0.85f)
+                val shouldSnap = OverlayWindowGeometry.shouldSnapBallToEdge(
+                    ballX = ballParams.x,
+                    ballW = ballW,
+                    screenW = metrics.widthPixels,
+                    density = metrics.density
+                )
+                if (shouldSnap) {
+                    val midX = ballParams.x + ballW / 2
+                    val dockRight = midX >= metrics.widthPixels / 2
+                    configStore.updateOverlayPrefs {
+                        it.copy(
+                            ballDocked = true,
+                            ballDockRight = dockRight,
+                            ballXFraction = OverlayPrefs.UNSET_FRACTION,
+                            ballYFraction = yFrac
+                        )
+                    }
+                    uiState = uiState.copy(ballDocked = true, ballDockRight = dockRight)
+                    snapBallToEdge(dockRight, ballW)
+                    scheduleIdleRetract()
+                } else {
+                    val xFrac = (ballParams.x.toFloat() / metrics.widthPixels.toFloat()).coerceIn(0f, 0.98f)
+                    configStore.updateOverlayPrefs {
+                        it.copy(
+                            ballDocked = false,
+                            ballXFraction = xFrac,
+                            ballYFraction = yFrac
+                        )
+                    }
+                    uiState = uiState.copy(ballDocked = false, ballIdleRetracted = false)
+                    idleRetractJob?.cancel()
+                }
+            } else if (uiState.ballDocked) {
+                scheduleIdleRetract()
+            }
+        }
+
         view.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     isDraggingBall = false
                     uiState = uiState.copy(ballIdleRetracted = false)
                     idleRetractJob?.cancel()
+                    activePointerId = event.getPointerId(0)
                     startX = ballParams.x
                     startY = ballParams.y
-                    downRawX = event.rawX
-                    downRawY = event.rawY
+                    downRawX = pointerRawX(event, 0)
+                    downRawY = pointerRawY(event, 0)
                     moved = false
                     longPressed = false
                     mainHandler.postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - downRawX).toInt()
-                    val dy = (event.rawY - downRawY).toInt()
+                    val pIdx = event.findPointerIndex(activePointerId)
+                    if (pIdx < 0) {
+                        if (moved) {
+                            completeBallGesture(v, triggerClick = false)
+                        }
+                        return@setOnTouchListener true
+                    }
+                    val dx = (pointerRawX(event, pIdx) - downRawX).roundToInt()
+                    val dy = (pointerRawY(event, pIdx) - downRawY).roundToInt()
                     if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
                         moved = true
                         isDraggingBall = true
@@ -429,55 +493,23 @@ class OverlayService : Service() {
                     val maxX = (metrics.widthPixels - ballW).coerceAtLeast(0)
                     val minY = dpToPx(36)
                     val maxY = (metrics.heightPixels - ballH.coerceAtLeast(dpToPx(64))).coerceAtLeast(minY)
-                    ballParams.x = (startX + dx).coerceIn(0, maxX)
-                    ballParams.y = (startY + dy).coerceIn(minY, maxY)
-                    runCatching { windowManager.updateViewLayout(v, ballParams) }
+                    val nextX = (startX + dx).coerceIn(0, maxX)
+                    val nextY = (startY + dy).coerceIn(minY, maxY)
+                    if (nextX != ballParams.x || nextY != ballParams.y) {
+                        ballParams.x = nextX
+                        ballParams.y = nextY
+                        runCatching { windowManager.updateViewLayout(v, ballParams) }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (event.getPointerId(event.actionIndex) == activePointerId) {
+                        completeBallGesture(v, triggerClick = false)
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    isDraggingBall = false
-                    mainHandler.removeCallbacks(longPressRunnable)
-                    if (!moved && !longPressed && event.actionMasked == MotionEvent.ACTION_UP) {
-                        expandPanel(autoCaptureDom = configStore.load().overlayPrefs.autoCaptureOnExpand)
-                    } else if (moved) {
-                        val metrics = resources.displayMetrics
-                        val ballW = if (v.width > 0) v.width else defaultBallWidthPx(uiState.collapsedBallStyle)
-                        val yFrac = (ballParams.y.toFloat() / metrics.heightPixels.toFloat()).coerceIn(0.08f, 0.85f)
-                        val shouldSnap = OverlayWindowGeometry.shouldSnapBallToEdge(
-                            ballX = ballParams.x,
-                            ballW = ballW,
-                            screenW = metrics.widthPixels,
-                            density = metrics.density
-                        )
-                        if (shouldSnap) {
-                            val midX = ballParams.x + ballW / 2
-                            val dockRight = midX >= metrics.widthPixels / 2
-                            configStore.updateOverlayPrefs {
-                                it.copy(
-                                    ballDocked = true,
-                                    ballDockRight = dockRight,
-                                    ballXFraction = OverlayPrefs.UNSET_FRACTION,
-                                    ballYFraction = yFrac
-                                )
-                            }
-                            uiState = uiState.copy(ballDocked = true, ballDockRight = dockRight)
-                            snapBallToEdge(dockRight, ballW)
-                            scheduleIdleRetract()
-                        } else {
-                            val xFrac = (ballParams.x.toFloat() / metrics.widthPixels.toFloat()).coerceIn(0f, 0.98f)
-                            configStore.updateOverlayPrefs {
-                                it.copy(
-                                    ballDocked = false,
-                                    ballXFraction = xFrac,
-                                    ballYFraction = yFrac
-                                )
-                            }
-                            uiState = uiState.copy(ballDocked = false, ballIdleRetracted = false)
-                            idleRetractJob?.cancel()
-                        }
-                    } else if (uiState.ballDocked) {
-                        scheduleIdleRetract()
-                    }
+                    completeBallGesture(v, triggerClick = event.actionMasked == MotionEvent.ACTION_UP)
                     true
                 }
                 else -> false
@@ -487,6 +519,193 @@ class OverlayService : Service() {
         ballView = view
         ballOwner = owner
     }
+
+    private enum class PanelTouchMode {
+        NONE,
+        HEADER_PENDING,
+        DRAGGING,
+        RESIZING
+    }
+
+    private inner class PanelTouchContainer(context: Context) : FrameLayout(context) {
+        var headerHeightPx: Int = 0
+        private var mode = PanelTouchMode.NONE
+        private var resizeEdge = ResizeEdge.BOTTOM_RIGHT
+        private var activePointerId = MotionEvent.INVALID_POINTER_ID
+        private var disallowIntercept = false
+        private var downRawX = 0f
+        private var downRawY = 0f
+        private var anchorRawX = 0f
+        private var anchorRawY = 0f
+        private var anchorBounds = WindowBoundsPx(0, 0, 0, 0)
+        private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+        private val cornerResizePx = dpToPx(28)
+        private val bottomResizePx = dpToPx(12)
+
+        override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
+            this.disallowIntercept = disallowIntercept
+            super.requestDisallowInterceptTouchEvent(disallowIntercept)
+        }
+
+        private fun currentBounds(): WindowBoundsPx = WindowBoundsPx(
+            x = panelParams.x,
+            y = panelParams.y,
+            width = panelParams.width,
+            height = panelParams.height
+        )
+
+        private fun finishActiveGesture() {
+            when (mode) {
+                PanelTouchMode.DRAGGING -> persistPanelPosition()
+                PanelTouchMode.RESIZING -> persistPanelBounds()
+                else -> Unit
+            }
+            mode = PanelTouchMode.NONE
+            activePointerId = MotionEvent.INVALID_POINTER_ID
+            disallowIntercept = false
+        }
+
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_OUTSIDE -> {
+                    if (isPanelFocusable) {
+                        disablePanelImeFocus(hideIme = true)
+                    }
+                    return super.dispatchTouchEvent(ev)
+                }
+                MotionEvent.ACTION_DOWN -> {
+                    mode = PanelTouchMode.NONE
+                    disallowIntercept = false
+                    activePointerId = ev.getPointerId(0)
+                    val w = width
+                    val h = height
+                    if (w > 0 && h > 0) {
+                        val hitEdge = when {
+                            ev.y >= h - cornerResizePx && ev.x >= w - cornerResizePx -> ResizeEdge.BOTTOM_RIGHT
+                            ev.y >= h - cornerResizePx && ev.x <= cornerResizePx -> ResizeEdge.BOTTOM_LEFT
+                            ev.y >= h - bottomResizePx && ev.x > cornerResizePx && ev.x < w - cornerResizePx -> ResizeEdge.BOTTOM
+                            else -> null
+                        }
+                        if (hitEdge != null) {
+                            mode = PanelTouchMode.RESIZING
+                            resizeEdge = hitEdge
+                            anchorBounds = currentBounds()
+                            anchorRawX = pointerRawX(ev, 0)
+                            anchorRawY = pointerRawY(ev, 0)
+                            return true
+                        }
+                    }
+                    val effectiveHeaderH = if (headerHeightPx > 0) headerHeightPx else dpToPx(96)
+                    if (ev.y >= 0f && ev.y <= effectiveHeaderH.toFloat()) {
+                        mode = PanelTouchMode.HEADER_PENDING
+                        downRawX = pointerRawX(ev, 0)
+                        downRawY = pointerRawY(ev, 0)
+                    }
+                    return super.dispatchTouchEvent(ev)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (mode == PanelTouchMode.NONE) {
+                        return super.dispatchTouchEvent(ev)
+                    }
+                    val pIdx = ev.findPointerIndex(activePointerId)
+                    if (pIdx < 0) {
+                        val wasActive = mode == PanelTouchMode.DRAGGING || mode == PanelTouchMode.RESIZING
+                        finishActiveGesture()
+                        return if (wasActive) true else super.dispatchTouchEvent(ev)
+                    }
+                    val rx = pointerRawX(ev, pIdx)
+                    val ry = pointerRawY(ev, pIdx)
+                    return when (mode) {
+                        PanelTouchMode.HEADER_PENDING -> {
+                            val handled = super.dispatchTouchEvent(ev)
+                            if (disallowIntercept) {
+                                mode = PanelTouchMode.NONE
+                                handled
+                            } else {
+                                val dist = hypot((rx - downRawX).toDouble(), (ry - downRawY).toDouble())
+                                if (dist > touchSlop) {
+                                    val cancelEv = MotionEvent.obtain(ev).apply {
+                                        action = MotionEvent.ACTION_CANCEL
+                                    }
+                                    super.dispatchTouchEvent(cancelEv)
+                                    cancelEv.recycle()
+                                    mode = PanelTouchMode.DRAGGING
+                                    anchorBounds = currentBounds()
+                                    anchorRawX = rx
+                                    anchorRawY = ry
+                                }
+                                handled
+                            }
+                        }
+                        PanelTouchMode.DRAGGING -> {
+                            val dm = resources.displayMetrics
+                            val totalDx = (rx - anchorRawX).roundToInt()
+                            val totalDy = (ry - anchorRawY).roundToInt()
+                            val next = OverlayWindowGeometry.applyPanelDrag(
+                                bounds = anchorBounds,
+                                dx = totalDx,
+                                dy = totalDy,
+                                screenW = dm.widthPixels,
+                                screenH = dm.heightPixels,
+                                density = dm.density
+                            )
+                            applyPanelBounds(next)
+                            true
+                        }
+                        PanelTouchMode.RESIZING -> {
+                            val dm = resources.displayMetrics
+                            val totalDx = (rx - anchorRawX).roundToInt()
+                            val totalDy = (ry - anchorRawY).roundToInt()
+                            val next = OverlayWindowGeometry.applyPanelResize(
+                                bounds = anchorBounds,
+                                edge = resizeEdge,
+                                dx = totalDx,
+                                dy = totalDy,
+                                screenW = dm.widthPixels,
+                                screenH = dm.heightPixels,
+                                density = dm.density
+                            )
+                            applyPanelBounds(next)
+                            true
+                        }
+                        PanelTouchMode.NONE -> super.dispatchTouchEvent(ev)
+                    }
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    val pointerId = ev.getPointerId(ev.actionIndex)
+                    if (pointerId == activePointerId && (mode == PanelTouchMode.DRAGGING || mode == PanelTouchMode.RESIZING)) {
+                        finishActiveGesture()
+                        return true
+                    }
+                    return super.dispatchTouchEvent(ev)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val wasActive = mode == PanelTouchMode.DRAGGING || mode == PanelTouchMode.RESIZING
+                    finishActiveGesture()
+                    return if (wasActive) true else super.dispatchTouchEvent(ev)
+                }
+                else -> return super.dispatchTouchEvent(ev)
+            }
+        }
+    }
+
+    private fun pointerRawX(ev: MotionEvent, pointerIndex: Int): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ev.getRawX(pointerIndex)
+        } else if (pointerIndex == 0) {
+            ev.rawX
+        } else {
+            ev.rawX + (ev.getX(pointerIndex) - ev.x)
+        }
+
+    private fun pointerRawY(ev: MotionEvent, pointerIndex: Int): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ev.getRawY(pointerIndex)
+        } else if (pointerIndex == 0) {
+            ev.rawY
+        } else {
+            ev.rawY + (ev.getY(pointerIndex) - ev.y)
+        }
 
     private fun initFloatingPanel() {
         val owner = OverlayLifecycleOwner()
@@ -499,35 +718,23 @@ class OverlayService : Service() {
             density = dm.density
         )
 
-        val view = ComposeView(this).apply {
+        val container = PanelTouchContainer(this).apply {
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
             elevation = 0f
             outlineProvider = null
             clipToOutline = false
-            owner.attachToView(this)
+        }
+
+        val composeView = ComposeView(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            elevation = 0f
+            outlineProvider = null
+            clipToOutline = false
             setContent {
                 CompositionLocalProvider(LocalUriHandler provides overlayUriHandler) {
                     FloatingPanelComposable(
                         state = uiState,
                         promptFocusRequester = promptFocusRequester,
-                        onDragDelta = { dx, dy ->
-                            val metrics = resources.displayMetrics
-                            val current = WindowBoundsPx(
-                                x = panelParams.x,
-                                y = panelParams.y,
-                                width = panelParams.width,
-                                height = panelParams.height
-                            )
-                            val next = OverlayWindowGeometry.applyPanelDrag(
-                                bounds = current,
-                                dx = dx,
-                                dy = dy,
-                                screenW = metrics.widthPixels,
-                                screenH = metrics.heightPixels,
-                                density = metrics.density
-                            )
-                            applyPanelBounds(next)
-                        },
                         onSelectProfile = { profileId ->
                             val cfg = configStore.load()
                             if (cfg.profiles.any { it.id == profileId }) {
@@ -566,40 +773,23 @@ class OverlayService : Service() {
                         onToggleQuestionIndex = { idx -> toggleQuestionIndex(idx) },
                         onSelectAllQuestions = { selectAllQuestions() },
                         onToggleDomImageIncluded = { idx -> toggleDomImageIncluded(idx) },
-                        onDragEnd = { persistPanelPosition() },
-                        onResizeDelta = { edge, dx, dy ->
-                            val metrics = resources.displayMetrics
-                            val current = WindowBoundsPx(
-                                x = panelParams.x,
-                                y = panelParams.y,
-                                width = panelParams.width,
-                                height = panelParams.height
-                            )
-                            val next = OverlayWindowGeometry.applyPanelResize(
-                                bounds = current,
-                                edge = edge,
-                                dx = dx,
-                                dy = dy,
-                                screenW = metrics.widthPixels,
-                                screenH = metrics.heightPixels,
-                                density = metrics.density
-                            )
-                            applyPanelBounds(next)
-                        },
-                        onResizeEnd = { persistPanelBounds() },
                         onSetThemeMode = { mode -> setOverlayThemeMode(mode) },
-                        onResetWindowBounds = { resetWindowBounds() }
+                        onResetWindowBounds = { resetWindowBounds() },
+                        onHeaderHeightChanged = { h -> container.headerHeightPx = h }
                     )
                 }
             }
         }
 
-        view.setOnTouchListener { _, event ->
-            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE && isPanelFocusable) {
-                disablePanelImeFocus(hideIme = true)
-            }
-            false
-        }
+        container.addView(
+            composeView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        owner.attachToView(container)
+        owner.attachToView(composeView)
 
         panelParams = WindowManager.LayoutParams(
             initialBounds.width,
@@ -618,11 +808,17 @@ class OverlayService : Service() {
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
 
-        panelView = view
+        panelView = container
+        panelComposeView = composeView
         panelOwner = owner
     }
 
     private fun applyPanelBounds(bounds: WindowBoundsPx) {
+        val unchanged = panelParams.x == bounds.x &&
+            panelParams.y == bounds.y &&
+            panelParams.width == bounds.width &&
+            panelParams.height == bounds.height
+        if (unchanged) return
         panelParams.x = bounds.x
         panelParams.y = bounds.y
         panelParams.width = bounds.width
@@ -811,11 +1007,11 @@ class OverlayService : Service() {
             isPanelFocusable = true
             applyPanelWindowFlags()
         }
-        val pv = panelView ?: return
-        pv.post {
+        val target = panelComposeView ?: panelView ?: return
+        target.post {
             runCatching { requester.requestFocus() }
             val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(pv, InputMethodManager.SHOW_IMPLICIT)
+            imm.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT)
         }
     }
 
@@ -825,10 +1021,9 @@ class OverlayService : Service() {
             applyPanelWindowFlags()
         }
         if (hideIme) {
-            panelView?.let { pv ->
-                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-                imm.hideSoftInputFromWindow(pv.windowToken, 0)
-            }
+            val target = panelComposeView ?: panelView ?: return
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.hideSoftInputFromWindow(target.windowToken, 0)
         }
     }
 

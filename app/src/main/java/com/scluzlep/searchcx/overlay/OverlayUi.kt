@@ -42,7 +42,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -61,12 +60,9 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -79,7 +75,6 @@ import com.scluzlep.searchcx.data.DomContextSource
 import com.scluzlep.searchcx.data.OverlayPrefs
 import com.scluzlep.searchcx.data.OverlayThemeMode
 import com.scluzlep.searchcx.data.ProviderProfile
-import com.scluzlep.searchcx.data.ResizeEdge
 import com.scluzlep.searchcx.ui.MarkdownMessageView
 
 data class ChatUiMessage(
@@ -347,81 +342,6 @@ fun overlayPalette(isDark: Boolean): OverlayPalette = if (isDark) {
     )
 }
 
-@Composable
-private fun Modifier.rawScreenDrag(
-    useTouchSlop: Boolean,
-    onDelta: (dx: Int, dy: Int) -> Unit,
-    onEnd: () -> Unit
-): Modifier {
-    val hostView = LocalView.current
-    val currentOnDelta by rememberUpdatedState(onDelta)
-    val currentOnEnd by rememberUpdatedState(onEnd)
-    val layoutCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
-
-    return this
-        .onGloballyPositioned { layoutCoordsRef[0] = it }
-        .pointerInput(useTouchSlop) {
-            val loc = IntArray(2)
-            val touchSlop = if (useTouchSlop) viewConfiguration.touchSlop else 0f
-            awaitEachGesture {
-                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                fun toScreen(localPos: Offset): Offset {
-                    hostView.getLocationOnScreen(loc)
-                    val coords = layoutCoordsRef[0]
-                    val rootPos = if (coords != null && coords.isAttached) {
-                        coords.localToRoot(localPos)
-                    } else {
-                        localPos
-                    }
-                    return Offset(loc[0] + rootPos.x, loc[1] + rootPos.y)
-                }
-
-                val startScreen = toScreen(down.position)
-                var lastRawX = startScreen.x
-                var lastRawY = startScreen.y
-                var dragging = !useTouchSlop
-                var hasMoved = false
-                try {
-                    while (true) {
-                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull { it.id == down.id }
-                            ?: event.changes.firstOrNull()
-                            ?: break
-                        if (!change.pressed) {
-                            if (dragging && hasMoved) {
-                                change.consume()
-                            }
-                            break
-                        }
-                        val curScreen = toScreen(change.position)
-                        if (!dragging) {
-                            val distX = curScreen.x - startScreen.x
-                            val distY = curScreen.y - startScreen.y
-                            if (distX * distX + distY * distY > touchSlop * touchSlop) {
-                                dragging = true
-                            }
-                        }
-                        if (dragging) {
-                            change.consume()
-                            val dx = (curScreen.x - lastRawX).toInt()
-                            val dy = (curScreen.y - lastRawY).toInt()
-                            if (dx != 0 || dy != 0) {
-                                hasMoved = true
-                                lastRawX += dx
-                                lastRawY += dy
-                                currentOnDelta(dx, dy)
-                            }
-                        }
-                    }
-                } finally {
-                    if (dragging && hasMoved) {
-                        currentOnEnd()
-                    }
-                }
-            }
-        }
-}
-
 /**
  * Edge-docked or freely floating collapsed entry: either a compact dot
  * or a compact textless circular icon button, expanding on tap and capturing on long press.
@@ -569,7 +489,6 @@ fun FloatingBallComposable(
 fun FloatingPanelComposable(
     state: OverlayUiState,
     promptFocusRequester: FocusRequester,
-    onDragDelta: (dx: Int, dy: Int) -> Unit,
     onSelectProfile: (String) -> Unit,
     onCaptureDom: () -> Unit,
     onCaptureScreen: () -> Unit,
@@ -593,11 +512,9 @@ fun FloatingPanelComposable(
     onToggleQuestionIndex: (Int) -> Unit = {},
     onSelectAllQuestions: () -> Unit = {},
     onToggleDomImageIncluded: (Int) -> Unit = {},
-    onDragEnd: () -> Unit = {},
-    onResizeDelta: (ResizeEdge, Int, Int) -> Unit = { _, _, _ -> },
-    onResizeEnd: () -> Unit = {},
     onSetThemeMode: (OverlayThemeMode) -> Unit = {},
-    onResetWindowBounds: () -> Unit = {}
+    onResetWindowBounds: () -> Unit = {},
+    onHeaderHeightChanged: (Int) -> Unit = {}
 ) {
     CompositionLocalProvider(LocalOverlayPalette provides overlayPalette(state.isDark)) {
         val palette = LocalOverlayPalette.current
@@ -623,16 +540,12 @@ fun FloatingPanelComposable(
                     .background(palette.cardBg)
                     .border(1.dp, palette.borderSubtle, panelShape)
             ) {
-                // Draggable top grabber + header strip
+                // Draggable top grabber + header strip (touch handled natively in PanelTouchContainer)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(palette.headerBg)
-                        .rawScreenDrag(
-                            useTouchSlop = true,
-                            onDelta = onDragDelta,
-                            onEnd = onDragEnd
-                        )
+                        .onSizeChanged { onHeaderHeightChanged(it.height) }
                         .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
@@ -1130,16 +1043,11 @@ fun FloatingPanelComposable(
 
             val gripColor = palette.resizeGrip.copy(alpha = palette.resizeGrip.alpha * state.panelOpacity)
 
-            // Bottom-Right resize grip
+            // Bottom-Right visual resize grip (touch handled natively in PanelTouchContainer)
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .size(24.dp)
-                    .rawScreenDrag(
-                        useTouchSlop = false,
-                        onDelta = { dx, dy -> onResizeDelta(ResizeEdge.BOTTOM_RIGHT, dx, dy) },
-                        onEnd = onResizeEnd
-                    )
             ) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val path = Path().apply {
@@ -1160,16 +1068,11 @@ fun FloatingPanelComposable(
                 }
             }
 
-            // Bottom-Left resize grip
+            // Bottom-Left visual resize grip (touch handled natively in PanelTouchContainer)
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .size(24.dp)
-                    .rawScreenDrag(
-                        useTouchSlop = false,
-                        onDelta = { dx, dy -> onResizeDelta(ResizeEdge.BOTTOM_LEFT, dx, dy) },
-                        onEnd = onResizeEnd
-                    )
             ) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val path = Path().apply {
@@ -1189,20 +1092,6 @@ fun FloatingPanelComposable(
                     )
                 }
             }
-
-            // Bottom-Center vertical resize grip
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp)
-                    .height(10.dp)
-                    .rawScreenDrag(
-                        useTouchSlop = false,
-                        onDelta = { _, dy -> onResizeDelta(ResizeEdge.BOTTOM, 0, dy) },
-                        onEnd = onResizeEnd
-                    )
-            )
         }
     }
 }

@@ -6,6 +6,7 @@ import top.yukonga.miuix.kmp.basic.Button
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,6 +22,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -39,15 +41,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +61,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.scluzlep.searchcx.data.AppConfig
 import com.scluzlep.searchcx.data.AppConfigStore
@@ -85,6 +92,7 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 import java.util.UUID
 
@@ -102,7 +110,7 @@ class MainActivity : ComponentActivity() {
     private var config by mutableStateOf(AppConfig())
     private var fetchedModels by mutableStateOf<List<String>>(emptyList())
     private var statusMessage by mutableStateOf("")
-    private var statusColor by mutableStateOf(COLOR_INFO)
+    private var statusTone by mutableStateOf(StatusTone.INFO)
 
     // Editable draft fields synced with config.activeProfile()
     private var editProfileId by mutableStateOf("")
@@ -128,7 +136,7 @@ class MainActivity : ComponentActivity() {
     private var editTikuTokens by mutableStateOf(TikuProviderTokens())
     private var showIcodefTokenField by mutableStateOf(false)
     private var tikuStatusMessage by mutableStateOf("")
-    private var tikuStatusColor by mutableStateOf(COLOR_INFO)
+    private var tikuStatusTone by mutableStateOf(StatusTone.INFO)
 
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -144,699 +152,719 @@ class MainActivity : ComponentActivity() {
         handleOAuthCallback(intent)
 
         setContent {
-            MiuixTheme(colors = lightColorScheme()) {
-                Scaffold(
-                    topBar = { TopAppBar(title = "SearchCX") }
-                ) { innerPadding ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        SmallTitle(
-                            text = "悬浮窗",
-                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                        val xposedStatus by ModuleStatus.status.collectAsState()
-                        val effectiveActive = xposedStatus.isActive || lsposedActive
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            insideMargin = PaddingValues(16.dp)
+            val sysDark = isSystemInDarkTheme()
+            val isDarkTheme = when (config.overlayPrefs.themeMode) {
+                OverlayThemeMode.FOLLOW_SYSTEM -> sysDark
+                OverlayThemeMode.LIGHT -> false
+                OverlayThemeMode.DARK -> true
+            }
+            val palette = mainPalette(isDarkTheme)
+            CompositionLocalProvider(LocalMainPalette provides palette) {
+                MiuixTheme(colors = if (isDarkTheme) darkColorScheme() else lightColorScheme()) {
+                    val surfaceArgb = MiuixTheme.colorScheme.surface.toArgb()
+                    SideEffect {
+                        @Suppress("DEPRECATION")
+                        window.statusBarColor = surfaceArgb
+                        @Suppress("DEPRECATION")
+                        window.navigationBarColor = surfaceArgb
+                        window.setBackgroundDrawable(ColorDrawable(surfaceArgb))
+                        val controller = WindowCompat.getInsetsController(window, window.decorView)
+                        controller.isAppearanceLightStatusBars = !isDarkTheme
+                        controller.isAppearanceLightNavigationBars = !isDarkTheme
+                    }
+                    Scaffold(
+                        topBar = { TopAppBar(title = "SearchCX") }
+                    ) { innerPadding ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(innerPadding)
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text(
-                                text = if (effectiveActive) "LSPosed 已激活" else "LSPosed 未激活",
-                                color = if (effectiveActive) COLOR_SUCCESS else COLOR_WARN,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium
+                            SmallTitle(
+                                text = "悬浮窗",
+                                insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                             )
-                            if (xposedStatus.serviceBound) {
-                                Spacer(modifier = Modifier.height(6.dp))
+                            val xposedStatus by ModuleStatus.status.collectAsState()
+                            val effectiveActive = xposedStatus.isActive || lsposedActive
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                insideMargin = PaddingValues(16.dp)
+                            ) {
                                 Text(
-                                    text = "${xposedStatus.frameworkName} ${xposedStatus.frameworkVersion} · API ${xposedStatus.apiVersion}",
-                                    color = Color(0xFF475569),
-                                    fontSize = 12.sp
+                                    text = if (effectiveActive) "LSPosed 已激活" else "LSPosed 未激活",
+                                    color = palette.statusColor(if (effectiveActive) COLOR_SUCCESS else COLOR_WARN),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
-                                Text(
-                                    text = "作用域 ${xposedStatus.scope.size} · 运行中 ${xposedStatus.runningTargets.size}",
-                                    color = Color(0xFF475569),
-                                    fontSize = 12.sp
-                                )
-                                if (xposedStatus.runningTargets.isNotEmpty()) {
-                                    val targetLine = xposedStatus.runningTargets.take(3).joinToString(" | ") {
-                                        "${it.processName}[${it.state}]"
-                                    } + if (xposedStatus.runningTargets.size > 3) " +${xposedStatus.runningTargets.size - 3}" else ""
+                                if (xposedStatus.serviceBound) {
+                                    Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        text = targetLine,
-                                        color = if (xposedStatus.staleTargetCount > 0) COLOR_WARN else Color(0xFF64748B),
-                                        fontSize = 11.sp
+                                        text = "${xposedStatus.frameworkName} ${xposedStatus.frameworkVersion} · API ${xposedStatus.apiVersion}",
+                                        color = palette.textSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                    Text(
+                                        text = "作用域 ${xposedStatus.scope.size} · 运行中 ${xposedStatus.runningTargets.size}",
+                                        color = palette.textSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                    if (xposedStatus.runningTargets.isNotEmpty()) {
+                                        val targetLine = xposedStatus.runningTargets.take(3).joinToString(" | ") {
+                                            "${it.processName}[${it.state}]"
+                                        } + if (xposedStatus.runningTargets.size > 3) " +${xposedStatus.runningTargets.size - 3}" else ""
+                                        Text(
+                                            text = targetLine,
+                                            color = if (xposedStatus.staleTargetCount > 0) palette.warn else palette.textMuted,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                                if (xposedStatus.lastActionMessage.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = xposedStatus.lastActionMessage,
+                                        color = palette.accentText,
+                                        fontSize = 12.sp
                                     )
                                 }
-                            }
-                            if (xposedStatus.lastActionMessage.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = { refreshRuntimeFlags() },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("刷新状态", fontSize = 13.sp)
+                                    }
+                                    Button(
+                                        onClick = { ModuleStatus.hotReloadTargets(reloadAllIfNoneStale = true) },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("热重载宿主", fontSize = 13.sp)
+                                    }
+                                }
+                                Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text = xposedStatus.lastActionMessage,
-                                    color = Color(0xFF2563EB),
-                                    fontSize = 12.sp
+                                    text = if (overlayGranted) "悬浮窗权限：已开启" else "悬浮窗权限：未开启",
+                                    color = palette.statusColor(if (overlayGranted) COLOR_SUCCESS else COLOR_WARN),
+                                    fontSize = 13.sp
                                 )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = { refreshRuntimeFlags() },
-                                    modifier = Modifier.weight(1f)
+                                Spacer(Modifier.height(12.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text("刷新状态", fontSize = 13.sp)
-                                }
-                                Button(
-                                    onClick = { ModuleStatus.hotReloadTargets(reloadAllIfNoneStale = true) },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("热重载宿主", fontSize = 13.sp)
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = if (overlayGranted) "悬浮窗权限：已开启" else "悬浮窗权限：未开启",
-                                color = if (overlayGranted) COLOR_SUCCESS else COLOR_WARN,
-                                fontSize = 13.sp
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                TextButton(
-                                    text = "权限",
-                                    onClick = { openOverlayPermissionSettings() },
-                                    modifier = Modifier.weight(0.8f)
-                                )
-                                TextButton(
-                                    text = "启动悬浮窗",
-                                    onClick = { ensurePermissionsAndStartOverlay() },
-                                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                                    modifier = Modifier.weight(1.4f)
-                                )
-                                TextButton(
-                                    text = "停止",
-                                    onClick = {
-                                        stopService(Intent(this@MainActivity, OverlayService::class.java))
-                                        setStatus("悬浮服务已停止", COLOR_INFO)
-                                    },
-                                    modifier = Modifier.weight(0.8f)
-                                )
-                            }
-
-                            Spacer(Modifier.height(12.dp))
-                            val prefs = config.overlayPrefs
-                            PrefToggleRow(
-                                label = "展开时自动读取网页",
-                                checked = prefs.autoCaptureOnExpand,
-                                onToggle = { updateOverlayPrefs { copy(autoCaptureOnExpand = !it.autoCaptureOnExpand) } }
-                            )
-                            PrefToggleRow(
-                                label = "长按直接抓取并提问",
-                                checked = prefs.longPressAutoAsk,
-                                onToggle = { updateOverlayPrefs { copy(longPressAutoAsk = !it.longPressAutoAsk) } }
-                            )
-                            PrefToggleRow(
-                                label = "闲置自动贴边半隐",
-                                checked = prefs.idleEdgeRetract,
-                                onToggle = { updateOverlayPrefs { copy(idleEdgeRetract = !it.idleEdgeRetract) } }
-                            )
-                            PrefToggleRow(
-                                label = "悬浮窗防截屏",
-                                checked = prefs.secureOverlay,
-                                onToggle = { updateOverlayPrefs { copy(secureOverlay = !it.secureOverlay) } }
-                            )
-
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "收起样式",
-                                fontSize = 12.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                listOf(
-                                    CollapsedBallStyle.BUTTON to "圆形按钮",
-                                    CollapsedBallStyle.MINI_DOT to "白色小点"
-                                ).forEach { (style, lbl) ->
-                                    SelectableChip(
-                                        label = lbl,
-                                        selected = prefs.collapsedBallStyle == style,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { updateOverlayPrefs { copy(collapsedBallStyle = style) } }
+                                    TextButton(
+                                        text = "权限",
+                                        onClick = { openOverlayPermissionSettings() },
+                                        modifier = Modifier.weight(0.8f)
                                     )
-                                }
-                            }
-
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                text = "悬浮窗透明度",
-                                fontSize = 12.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                listOf(0.75f to "75%", 0.90f to "90%", 0.96f to "96%", 1.0f to "100%").forEach { (op, lbl) ->
-                                    val selected = kotlin.math.abs(prefs.panelOpacity - op) < 0.03f
-                                    SelectableChip(
-                                        label = lbl,
-                                        selected = selected,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { updateOverlayPrefs { copy(panelOpacity = op) } }
+                                    TextButton(
+                                        text = "启动悬浮窗",
+                                        onClick = { ensurePermissionsAndStartOverlay() },
+                                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                                        modifier = Modifier.weight(1.4f)
                                     )
-                                }
-                            }
-
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                text = "悬浮窗外观",
-                                fontSize = 12.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            ThemeModeSlider(
-                                selectedMode = prefs.themeMode,
-                                onSelectMode = { mode -> updateOverlayPrefs { copy(themeMode = mode) } }
-                            )
-
-                            Spacer(Modifier.height(10.dp))
-                            TextButton(
-                                text = "重置悬浮窗位置与大小",
-                                onClick = {
-                                    updateOverlayPrefs { withResetWindowBounds() }
-                                    setStatus("已重置悬浮窗位置与大小", COLOR_INFO)
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        SmallTitle(
-                            text = "AI 配置",
-                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            insideMargin = PaddingValues(16.dp)
-                        ) {
-                            // Profile selector strip
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                config.profiles.forEach { profile ->
-                                    SelectableChip(
-                                        label = profile.name.ifBlank { profile.type.name },
-                                        selected = profile.id == config.activeProfileId,
-                                        onClick = { switchActiveProfile(profile.id) }
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                TextButton(
-                                    text = "+ OAI",
-                                    onClick = { addNewProfile(ProviderType.OPENAI_CHAT) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    text = "+ Codex",
-                                    onClick = { addNewProfile(ProviderType.CODEX_OAUTH) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    text = "删除当前",
-                                    onClick = { deleteActiveProfile() },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-
-                            Spacer(Modifier.height(12.dp))
-                            TextField(
-                                value = editName,
-                                onValueChange = { editName = it },
-                                label = "配置名称",
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(10.dp))
-
-                            Text(
-                                text = "接口协议类型",
-                                fontSize = 12.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                listOf(
-                                    ProviderType.OPENAI_CHAT to "OAI Chat",
-                                    ProviderType.OPENAI_RESPONSES to "OAI Responses",
-                                    ProviderType.CODEX_OAUTH to "Codex OAuth",
-                                    ProviderType.CUSTOM_OAUTH to "自定义 OAuth"
-                                ).forEach { (t, lbl) ->
-                                    SelectableChip(
-                                        label = lbl,
-                                        selected = editType == t,
+                                    TextButton(
+                                        text = "停止",
                                         onClick = {
-                                            editType = t
-                                            if (t == ProviderType.CODEX_OAUTH) {
-                                                editBaseUrl = ProviderProfile.CODEX_BASE_URL
-                                                if (editModel == "gpt-4o-mini" || editModel.isBlank()) {
-                                                    editModel = "gpt-5.1-codex"
-                                                }
-                                            }
-                                        }
+                                            stopService(Intent(this@MainActivity, OverlayService::class.java))
+                                            setStatus("悬浮服务已停止", COLOR_INFO)
+                                        },
+                                        modifier = Modifier.weight(0.8f)
                                     )
                                 }
+
+                                Spacer(Modifier.height(12.dp))
+                                val prefs = config.overlayPrefs
+                                PrefToggleRow(
+                                    label = "展开时自动读取网页",
+                                    checked = prefs.autoCaptureOnExpand,
+                                    onToggle = { updateOverlayPrefs { copy(autoCaptureOnExpand = !it.autoCaptureOnExpand) } }
+                                )
+                                PrefToggleRow(
+                                    label = "长按直接抓取并提问",
+                                    checked = prefs.longPressAutoAsk,
+                                    onToggle = { updateOverlayPrefs { copy(longPressAutoAsk = !it.longPressAutoAsk) } }
+                                )
+                                PrefToggleRow(
+                                    label = "闲置自动贴边半隐",
+                                    checked = prefs.idleEdgeRetract,
+                                    onToggle = { updateOverlayPrefs { copy(idleEdgeRetract = !it.idleEdgeRetract) } }
+                                )
+                                PrefToggleRow(
+                                    label = "悬浮窗防截屏",
+                                    checked = prefs.secureOverlay,
+                                    onToggle = { updateOverlayPrefs { copy(secureOverlay = !it.secureOverlay) } }
+                                )
+
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = "收起样式",
+                                    fontSize = 12.sp,
+                                    color = palette.textMuted
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf(
+                                        CollapsedBallStyle.BUTTON to "圆形按钮",
+                                        CollapsedBallStyle.MINI_DOT to "白色小点"
+                                    ).forEach { (style, lbl) ->
+                                        SelectableChip(
+                                            label = lbl,
+                                            selected = prefs.collapsedBallStyle == style,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { updateOverlayPrefs { copy(collapsedBallStyle = style) } }
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    text = "悬浮窗透明度",
+                                    fontSize = 12.sp,
+                                    color = palette.textMuted
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf(0.75f to "75%", 0.90f to "90%", 0.96f to "96%", 1.0f to "100%").forEach { (op, lbl) ->
+                                        val selected = kotlin.math.abs(prefs.panelOpacity - op) < 0.03f
+                                        SelectableChip(
+                                            label = lbl,
+                                            selected = selected,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { updateOverlayPrefs { copy(panelOpacity = op) } }
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    text = "外观模式",
+                                    fontSize = 12.sp,
+                                    color = palette.textMuted
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                ThemeModeSlider(
+                                    selectedMode = prefs.themeMode,
+                                    onSelectMode = { mode -> updateOverlayPrefs { copy(themeMode = mode) } }
+                                )
+
+                                Spacer(Modifier.height(10.dp))
+                                TextButton(
+                                    text = "重置悬浮窗位置与大小",
+                                    onClick = {
+                                        updateOverlayPrefs { withResetWindowBounds() }
+                                        setStatus("已重置悬浮窗位置与大小", COLOR_INFO)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
 
-                            Spacer(Modifier.height(10.dp))
-                            if (editType != ProviderType.CODEX_OAUTH) {
+                            SmallTitle(
+                                text = "AI 配置",
+                                insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            )
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                insideMargin = PaddingValues(16.dp)
+                            ) {
+                                // Profile selector strip
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    config.profiles.forEach { profile ->
+                                        SelectableChip(
+                                            label = profile.name.ifBlank { profile.type.name },
+                                            selected = profile.id == config.activeProfileId,
+                                            onClick = { switchActiveProfile(profile.id) }
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(10.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    TextButton(
+                                        text = "+ OAI",
+                                        onClick = { addNewProfile(ProviderType.OPENAI_CHAT) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        text = "+ Codex",
+                                        onClick = { addNewProfile(ProviderType.CODEX_OAUTH) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        text = "删除当前",
+                                        onClick = { deleteActiveProfile() },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                Spacer(Modifier.height(12.dp))
                                 TextField(
-                                    value = editBaseUrl,
-                                    onValueChange = { editBaseUrl = it },
-                                    label = "Base URL",
+                                    value = editName,
+                                    onValueChange = { editName = it },
+                                    label = "配置名称",
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 Spacer(Modifier.height(10.dp))
-                            } else {
+
                                 Text(
-                                    text = "Codex 端点：${ProviderProfile.CODEX_BASE_URL}/responses",
+                                    text = "接口协议类型",
                                     fontSize = 12.sp,
-                                    color = Color(0xFF4B5563)
+                                    color = palette.textMuted
                                 )
-                                Spacer(Modifier.height(8.dp))
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextField(
-                                    value = editModel,
-                                    onValueChange = { editModel = it },
-                                    label = "Model",
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1.4f)
-                                )
-                                TextButton(
-                                    text = "拉取模型",
-                                    onClick = { fetchModelsForActiveProfile() },
-                                    modifier = Modifier.weight(0.9f)
-                                )
-                            }
-
-                            if (fetchedModels.isNotEmpty()) {
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(6.dp))
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    fetchedModels.take(18).forEach { m ->
+                                    listOf(
+                                        ProviderType.OPENAI_CHAT to "OAI Chat",
+                                        ProviderType.OPENAI_RESPONSES to "OAI Responses",
+                                        ProviderType.CODEX_OAUTH to "Codex OAuth",
+                                        ProviderType.CUSTOM_OAUTH to "自定义 OAuth"
+                                    ).forEach { (t, lbl) ->
                                         SelectableChip(
-                                            label = m,
-                                            selected = editModel.trim() == m,
-                                            onClick = { editModel = m }
+                                            label = lbl,
+                                            selected = editType == t,
+                                            onClick = {
+                                                editType = t
+                                                if (t == ProviderType.CODEX_OAUTH) {
+                                                    editBaseUrl = ProviderProfile.CODEX_BASE_URL
+                                                    if (editModel == "gpt-4o-mini" || editModel.isBlank()) {
+                                                        editModel = "gpt-5.1-codex"
+                                                    }
+                                                }
+                                            }
                                         )
                                     }
                                 }
-                            }
 
-                            Spacer(Modifier.height(10.dp))
-                            when (editType) {
-                                ProviderType.OPENAI_CHAT, ProviderType.OPENAI_RESPONSES -> {
+                                Spacer(Modifier.height(10.dp))
+                                if (editType != ProviderType.CODEX_OAUTH) {
                                     TextField(
-                                        value = editApiKey,
-                                        onValueChange = { editApiKey = it },
-                                        label = "API Key",
+                                        value = editBaseUrl,
+                                        onValueChange = { editBaseUrl = it },
+                                        label = "Base URL",
                                         singleLine = true,
-                                        visualTransformation = PasswordVisualTransformation(),
                                         modifier = Modifier.fillMaxWidth()
                                     )
-                                }
-                                ProviderType.CODEX_OAUTH -> {
-                                    val active = config.activeProfile()
-                                    val signedIn = active.oauthAccessToken.isNotBlank()
-                                    val accountLine = if (signedIn) {
-                                        val who = active.oauthEmail.ifBlank { active.oauthAccountId.ifBlank { "已登录" } }
-                                        val plan = active.oauthPlan.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
-                                        "Codex：已登录 · $who$plan"
-                                    } else {
-                                        "Codex：未登录"
-                                    }
+                                    Spacer(Modifier.height(10.dp))
+                                } else {
                                     Text(
-                                        text = accountLine,
-                                        color = if (signedIn) COLOR_SUCCESS else Color(0xFF4B5563),
-                                        fontSize = 12.sp
+                                        text = "Codex 端点：${ProviderProfile.CODEX_BASE_URL}/responses",
+                                        fontSize = 12.sp,
+                                        color = palette.textSecondary
                                     )
                                     Spacer(Modifier.height(8.dp))
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    TextField(
+                                        value = editModel,
+                                        onValueChange = { editModel = it },
+                                        label = "Model",
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1.4f)
+                                    )
+                                    TextButton(
+                                        text = "拉取模型",
+                                        onClick = { fetchModelsForActiveProfile() },
+                                        modifier = Modifier.weight(0.9f)
+                                    )
+                                }
+
+                                if (fetchedModels.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        TextButton(
-                                            text = if (signedIn) "重新登录" else "登录 Codex",
-                                            onClick = { startCodexOAuthLogin() },
-                                            colors = ButtonDefaults.textButtonColorsPrimary(),
-                                            modifier = Modifier.weight(1.4f)
-                                        )
-                                        TextButton(
-                                            text = "刷新",
-                                            onClick = { refreshActiveOAuthToken() },
-                                            modifier = Modifier.weight(0.7f)
-                                        )
-                                        TextButton(
-                                            text = "退出",
-                                            onClick = { logoutActiveOAuth() },
-                                            modifier = Modifier.weight(0.7f)
-                                        )
+                                        fetchedModels.take(18).forEach { m ->
+                                            SelectableChip(
+                                                label = m,
+                                                selected = editModel.trim() == m,
+                                                onClick = { editModel = m }
+                                            )
+                                        }
                                     }
                                 }
-                                ProviderType.CUSTOM_OAUTH -> {
-                                    val active = config.activeProfile()
-                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                                Spacer(Modifier.height(10.dp))
+                                when (editType) {
+                                    ProviderType.OPENAI_CHAT, ProviderType.OPENAI_RESPONSES -> {
                                         TextField(
-                                            value = editOAuthAuthUrl,
-                                            onValueChange = { editOAuthAuthUrl = it },
-                                            label = "Authorize Endpoint",
+                                            value = editApiKey,
+                                            onValueChange = { editApiKey = it },
+                                            label = "API Key",
                                             singleLine = true,
+                                            visualTransformation = PasswordVisualTransformation(),
                                             modifier = Modifier.fillMaxWidth()
                                         )
-                                        TextField(
-                                            value = editOAuthTokenUrl,
-                                            onValueChange = { editOAuthTokenUrl = it },
-                                            label = "Token Endpoint",
-                                            singleLine = true,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                        TextField(
-                                            value = editOAuthClientId,
-                                            onValueChange = { editOAuthClientId = it },
-                                            label = "OAuth Client ID",
-                                            singleLine = true,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                        TextField(
-                                            value = editOAuthScopes,
-                                            onValueChange = { editOAuthScopes = it },
-                                            label = "Scopes",
-                                            singleLine = true,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
+                                    }
+                                    ProviderType.CODEX_OAUTH -> {
+                                        val active = config.activeProfile()
+                                        val signedIn = active.oauthAccessToken.isNotBlank()
+                                        val accountLine = if (signedIn) {
+                                            val who = active.oauthEmail.ifBlank { active.oauthAccountId.ifBlank { "已登录" } }
+                                            val plan = active.oauthPlan.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+                                            "Codex：已登录 · $who$plan"
+                                        } else {
+                                            "Codex：未登录"
+                                        }
                                         Text(
-                                            text = if (active.oauthAccessToken.isNotBlank()) {
-                                                "OAuth：已登录"
-                                            } else {
-                                                "OAuth：未登录"
-                                            },
-                                            color = if (active.oauthAccessToken.isNotBlank()) COLOR_SUCCESS else Color(0xFF4B5563),
+                                            text = accountLine,
+                                            color = if (signedIn) palette.success else palette.textSecondary,
                                             fontSize = 12.sp
                                         )
+                                        Spacer(Modifier.height(8.dp))
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
                                             TextButton(
-                                                text = "浏览器授权",
-                                                onClick = { launchCustomOAuthLogin() },
+                                                text = if (signedIn) "重新登录" else "登录 Codex",
+                                                onClick = { startCodexOAuthLogin() },
                                                 colors = ButtonDefaults.textButtonColorsPrimary(),
-                                                modifier = Modifier.weight(1f)
+                                                modifier = Modifier.weight(1.4f)
                                             )
                                             TextButton(
-                                                text = "刷新 Token",
+                                                text = "刷新",
                                                 onClick = { refreshActiveOAuthToken() },
-                                                modifier = Modifier.weight(1f)
+                                                modifier = Modifier.weight(0.7f)
                                             )
+                                            TextButton(
+                                                text = "退出",
+                                                onClick = { logoutActiveOAuth() },
+                                                modifier = Modifier.weight(0.7f)
+                                            )
+                                        }
+                                    }
+                                    ProviderType.CUSTOM_OAUTH -> {
+                                        val active = config.activeProfile()
+                                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                            TextField(
+                                                value = editOAuthAuthUrl,
+                                                onValueChange = { editOAuthAuthUrl = it },
+                                                label = "Authorize Endpoint",
+                                                singleLine = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            TextField(
+                                                value = editOAuthTokenUrl,
+                                                onValueChange = { editOAuthTokenUrl = it },
+                                                label = "Token Endpoint",
+                                                singleLine = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            TextField(
+                                                value = editOAuthClientId,
+                                                onValueChange = { editOAuthClientId = it },
+                                                label = "OAuth Client ID",
+                                                singleLine = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            TextField(
+                                                value = editOAuthScopes,
+                                                onValueChange = { editOAuthScopes = it },
+                                                label = "Scopes",
+                                                singleLine = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Text(
+                                                text = if (active.oauthAccessToken.isNotBlank()) {
+                                                    "OAuth：已登录"
+                                                } else {
+                                                    "OAuth：未登录"
+                                                },
+                                                color = if (active.oauthAccessToken.isNotBlank()) palette.success else palette.textSecondary,
+                                                fontSize = 12.sp
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                TextButton(
+                                                    text = "浏览器授权",
+                                                    onClick = { launchCustomOAuthLogin() },
+                                                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                TextButton(
+                                                    text = "刷新 Token",
+                                                    onClick = { refreshActiveOAuthToken() },
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        SmallTitle(
-                            text = "题库配置",
-                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            insideMargin = PaddingValues(16.dp)
-                        ) {
-                            PrefToggleRow(
-                                label = "启用 tikuAdapter 题库",
-                                checked = editTikuEnabled,
-                                onToggle = { editTikuEnabled = !editTikuEnabled }
+                            SmallTitle(
+                                text = "题库配置",
+                                insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                             )
-
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "接入方式",
-                                fontSize = 12.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
+                            Card(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                insideMargin = PaddingValues(16.dp)
                             ) {
-                                listOf(
-                                    TikuMode.DIRECT_BUILTIN to "内置聚合",
-                                    TikuMode.REMOTE_ADAPTER to "远端服务"
-                                ).forEach { (mode, label) ->
-                                    SelectableChip(
-                                        label = label,
-                                        selected = editTikuMode == mode,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { editTikuMode = mode }
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = if (editTikuMode == TikuMode.DIRECT_BUILTIN) {
-                                    "直连 icodef、不挂科等题库，聚合结果无需服务端"
-                                } else {
-                                    "连接自建 tikuAdapter 服务，支持本地题库"
-                                },
-                                fontSize = 11.sp,
-                                color = Color(0xFF6B7280)
-                            )
-
-                            if (editTikuMode == TikuMode.REMOTE_ADAPTER) {
-                                Spacer(Modifier.height(10.dp))
-                                TextField(
-                                    value = editTikuRemoteUrl,
-                                    onValueChange = { editTikuRemoteUrl = it },
-                                    label = "远端服务地址",
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
+                                PrefToggleRow(
+                                    label = "启用 tikuAdapter 题库",
+                                    checked = editTikuEnabled,
+                                    onToggle = { editTikuEnabled = !editTikuEnabled }
                                 )
-                            }
 
-                            Spacer(Modifier.height(6.dp))
-                            PrefToggleRow(
-                                label = "提问时先查题库",
-                                checked = editTikuAutoQuery,
-                                onToggle = { editTikuAutoQuery = !editTikuAutoQuery }
-                            )
-                            PrefToggleRow(
-                                label = "全命中时跳过 AI",
-                                checked = editTikuSkipAiOnHit,
-                                onToggle = { editTikuSkipAiOnHit = !editTikuSkipAiOnHit }
-                            )
-
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = "免费题库源",
-                                fontSize = 12.sp,
-                                color = Color(0xFF4B5563),
-                                fontWeight = FontWeight.Medium
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            val visibleFreeProviders = TikuProvider.freeProviders().filter {
-                                editTikuMode == TikuMode.REMOTE_ADAPTER || !it.remoteOnly
-                            }
-                            TikuProviderChipRow(
-                                providers = visibleFreeProviders,
-                                selectedIds = editTikuProviders,
-                                onToggle = { id -> toggleTikuProvider(id) }
-                            )
-
-                            if (TikuProvider.ICODEF.id in editTikuProviders) {
-                                val icodefExpanded = showIcodefTokenField || editTikuTokens.icodefToken.isNotBlank()
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(6.dp))
                                 Text(
-                                    text = if (icodefExpanded) "icodef Token · 选填 收起" else "icodef Token · 选填",
-                                    fontSize = 11.sp,
-                                    color = COLOR_INFO,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.clickable {
-                                        showIcodefTokenField = !icodefExpanded
-                                    }
+                                    text = "接入方式",
+                                    fontSize = 12.sp,
+                                    color = palette.textMuted
                                 )
-                                if (icodefExpanded) {
-                                    Spacer(Modifier.height(6.dp))
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf(
+                                        TikuMode.DIRECT_BUILTIN to "内置聚合",
+                                        TikuMode.REMOTE_ADAPTER to "远端服务"
+                                    ).forEach { (mode, label) ->
+                                        SelectableChip(
+                                            label = label,
+                                            selected = editTikuMode == mode,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { editTikuMode = mode }
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = if (editTikuMode == TikuMode.DIRECT_BUILTIN) {
+                                        "直连 icodef、不挂科等题库，聚合结果无需服务端"
+                                    } else {
+                                        "连接自建 tikuAdapter 服务，支持本地题库"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = palette.textMuted
+                                )
+
+                                if (editTikuMode == TikuMode.REMOTE_ADAPTER) {
+                                    Spacer(Modifier.height(10.dp))
                                     TextField(
-                                        value = editTikuTokens.icodefToken,
-                                        onValueChange = {
-                                            editTikuTokens = editTikuTokens.withToken(TikuProvider.ICODEF, it)
-                                        },
-                                        label = "icodef Token",
+                                        value = editTikuRemoteUrl,
+                                        onValueChange = { editTikuRemoteUrl = it },
+                                        label = "远端服务地址",
                                         singleLine = true,
-                                        visualTransformation = PasswordVisualTransformation(),
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
-                            }
 
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                text = "收费题库源",
-                                fontSize = 12.sp,
-                                color = Color(0xFF4B5563),
-                                fontWeight = FontWeight.Medium
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = "默认关闭，按需开启并填写对应 Token",
-                                fontSize = 11.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            TikuProviderChipRow(
-                                providers = TikuProvider.paidProviders(),
-                                selectedIds = editTikuProviders,
-                                onToggle = { id -> toggleTikuProvider(id) }
-                            )
+                                Spacer(Modifier.height(6.dp))
+                                PrefToggleRow(
+                                    label = "提问时先查题库",
+                                    checked = editTikuAutoQuery,
+                                    onToggle = { editTikuAutoQuery = !editTikuAutoQuery }
+                                )
+                                PrefToggleRow(
+                                    label = "全命中时跳过 AI",
+                                    checked = editTikuSkipAiOnHit,
+                                    onToggle = { editTikuSkipAiOnHit = !editTikuSkipAiOnHit }
+                                )
 
-                            val enabledPaidProviders = TikuProvider.paidProviders().filter {
-                                it.id in editTikuProviders
-                            }
-                            if (enabledPaidProviders.isNotEmpty()) {
                                 Spacer(Modifier.height(8.dp))
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    enabledPaidProviders.forEach { provider ->
+                                Text(
+                                    text = "免费题库源",
+                                    fontSize = 12.sp,
+                                    color = palette.textSecondary,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                val visibleFreeProviders = TikuProvider.freeProviders().filter {
+                                    editTikuMode == TikuMode.REMOTE_ADAPTER || !it.remoteOnly
+                                }
+                                TikuProviderChipRow(
+                                    providers = visibleFreeProviders,
+                                    selectedIds = editTikuProviders,
+                                    onToggle = { id -> toggleTikuProvider(id) }
+                                )
+
+                                if (TikuProvider.ICODEF.id in editTikuProviders) {
+                                    val icodefExpanded = showIcodefTokenField || editTikuTokens.icodefToken.isNotBlank()
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = if (icodefExpanded) "icodef Token · 选填 收起" else "icodef Token · 选填",
+                                        fontSize = 11.sp,
+                                        color = palette.accentText,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.clickable {
+                                            showIcodefTokenField = !icodefExpanded
+                                        }
+                                    )
+                                    if (icodefExpanded) {
+                                        Spacer(Modifier.height(6.dp))
                                         TextField(
-                                            value = editTikuTokens.tokenFor(provider),
+                                            value = editTikuTokens.icodefToken,
                                             onValueChange = {
-                                                editTikuTokens = editTikuTokens.withToken(provider, it)
+                                                editTikuTokens = editTikuTokens.withToken(TikuProvider.ICODEF, it)
                                             },
-                                            label = "${provider.displayName} Token",
+                                            label = "icodef Token",
                                             singleLine = true,
                                             visualTransformation = PasswordVisualTransformation(),
                                             modifier = Modifier.fillMaxWidth()
                                         )
                                     }
                                 }
-                            }
 
-                            Spacer(Modifier.height(12.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                TextButton(
-                                    text = "保存题库",
-                                    onClick = { saveTikuConfigToStore() },
-                                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    text = "测试题库",
-                                    onClick = { testTikuConnection() },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (tikuStatusMessage.isNotBlank()) {
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    text = tikuStatusMessage,
-                                    color = tikuStatusColor,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-
-                        SmallTitle(
-                            text = "系统提示词与保存",
-                            insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            insideMargin = PaddingValues(16.dp)
-                        ) {
-                            TextField(
-                                value = editSystemPrompt,
-                                onValueChange = { editSystemPrompt = it },
-                                label = "系统提示词",
-                                minLines = 2,
-                                maxLines = 4,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            TextField(
-                                value = editQuickPrompt,
-                                onValueChange = { editQuickPrompt = it },
-                                label = "默认提问指令",
-                                minLines = 2,
-                                maxLines = 3,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                TextButton(
-                                    text = "保存全部配置",
-                                    onClick = { saveDraftToStore() },
-                                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    text = "测试连接",
-                                    onClick = { testApiConnection() },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            if (statusMessage.isNotBlank()) {
                                 Spacer(Modifier.height(10.dp))
                                 Text(
-                                    text = statusMessage,
-                                    color = statusColor,
-                                    fontSize = 13.sp
+                                    text = "收费题库源",
+                                    fontSize = 12.sp,
+                                    color = palette.textSecondary,
+                                    fontWeight = FontWeight.Medium
                                 )
-                            }
-                        }
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "默认关闭，按需开启并填写对应 Token",
+                                    fontSize = 11.sp,
+                                    color = palette.textMuted
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                TikuProviderChipRow(
+                                    providers = TikuProvider.paidProviders(),
+                                    selectedIds = editTikuProviders,
+                                    onToggle = { id -> toggleTikuProvider(id) }
+                                )
 
-                        Spacer(Modifier.height(20.dp))
+                                val enabledPaidProviders = TikuProvider.paidProviders().filter {
+                                    it.id in editTikuProviders
+                                }
+                                if (enabledPaidProviders.isNotEmpty()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        enabledPaidProviders.forEach { provider ->
+                                            TextField(
+                                                value = editTikuTokens.tokenFor(provider),
+                                                onValueChange = {
+                                                    editTikuTokens = editTikuTokens.withToken(provider, it)
+                                                },
+                                                label = "${provider.displayName} Token",
+                                                singleLine = true,
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.height(12.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    TextButton(
+                                        text = "保存题库",
+                                        onClick = { saveTikuConfigToStore() },
+                                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        text = "测试题库",
+                                        onClick = { testTikuConnection() },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (tikuStatusMessage.isNotBlank()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = tikuStatusMessage,
+                                        color = palette.statusColor(tikuStatusTone),
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+
+                            SmallTitle(
+                                text = "系统提示词与保存",
+                                insideMargin = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            )
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                insideMargin = PaddingValues(16.dp)
+                            ) {
+                                TextField(
+                                    value = editSystemPrompt,
+                                    onValueChange = { editSystemPrompt = it },
+                                    label = "系统提示词",
+                                    minLines = 2,
+                                    maxLines = 4,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                TextField(
+                                    value = editQuickPrompt,
+                                    onValueChange = { editQuickPrompt = it },
+                                    label = "默认提问指令",
+                                    minLines = 2,
+                                    maxLines = 3,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    TextButton(
+                                        text = "保存全部配置",
+                                        onClick = { saveDraftToStore() },
+                                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        text = "测试连接",
+                                        onClick = { testApiConnection() },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (statusMessage.isNotBlank()) {
+                                    Spacer(Modifier.height(10.dp))
+                                    Text(
+                                        text = statusMessage,
+                                        color = palette.statusColor(statusTone),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+
+                            Spacer(Modifier.height(20.dp))
+                        }
                     }
                 }
             }
@@ -1336,22 +1364,106 @@ class MainActivity : ComponentActivity() {
         setStatus("已清除该账号的 OAuth 凭据", COLOR_INFO)
     }
 
-    private fun setStatus(message: String, color: Color) {
+    private fun setStatus(message: String, tone: StatusTone) {
         statusMessage = message
-        statusColor = color
+        statusTone = tone
     }
 
-    private fun setTikuStatus(message: String, color: Color) {
+    private fun setTikuStatus(message: String, tone: StatusTone) {
         tikuStatusMessage = message
-        tikuStatusColor = color
+        tikuStatusTone = tone
     }
 
     companion object {
-        private val COLOR_INFO = Color(0xFF3482FF)
-        private val COLOR_SUCCESS = Color(0xFF15803D)
-        private val COLOR_WARN = Color(0xFFB45309)
-        private val COLOR_ERROR = Color(0xFFCF1322)
+        private val COLOR_INFO = StatusTone.INFO
+        private val COLOR_SUCCESS = StatusTone.SUCCESS
+        private val COLOR_WARN = StatusTone.WARN
+        private val COLOR_ERROR = StatusTone.ERROR
     }
+}
+
+private enum class StatusTone {
+    INFO,
+    SUCCESS,
+    WARN,
+    ERROR
+}
+
+private data class MainPalette(
+    val isDark: Boolean,
+    val accentFill: Color,
+    val accentText: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val textMuted: Color,
+    val chipUnselectedBg: Color,
+    val chipUnselectedText: Color,
+    val toggleOffBg: Color,
+    val toggleOffText: Color,
+    val sliderTrackBg: Color,
+    val sliderThumbBg: Color,
+    val sliderThumbBorder: Color,
+    val sliderActiveText: Color,
+    val sliderInactiveText: Color,
+    val info: Color,
+    val success: Color,
+    val warn: Color,
+    val error: Color
+) {
+    fun statusColor(tone: StatusTone): Color = when (tone) {
+        StatusTone.INFO -> info
+        StatusTone.SUCCESS -> success
+        StatusTone.WARN -> warn
+        StatusTone.ERROR -> error
+    }
+}
+
+private val LocalMainPalette = staticCompositionLocalOf { mainPalette(false) }
+
+private fun mainPalette(isDark: Boolean): MainPalette = if (isDark) {
+    MainPalette(
+        isDark = true,
+        accentFill = Color(0xFF3482FF),
+        accentText = Color(0xFF60A5FA),
+        textPrimary = Color(0xFFF3F4F6),
+        textSecondary = Color(0xFFD1D5DB),
+        textMuted = Color(0xFF9CA3AF),
+        chipUnselectedBg = Color(0xFF262B38),
+        chipUnselectedText = Color(0xFFE5E7EB),
+        toggleOffBg = Color(0xFF374151),
+        toggleOffText = Color(0xFFD1D5DB),
+        sliderTrackBg = Color(0xFF262B38),
+        sliderThumbBg = Color(0xFF374151),
+        sliderThumbBorder = Color(0x33FFFFFF),
+        sliderActiveText = Color(0xFF93C5FD),
+        sliderInactiveText = Color(0xFF9CA3AF),
+        info = Color(0xFF60A5FA),
+        success = Color(0xFF4ADE80),
+        warn = Color(0xFFFBBF24),
+        error = Color(0xFFF87171)
+    )
+} else {
+    MainPalette(
+        isDark = false,
+        accentFill = Color(0xFF3482FF),
+        accentText = Color(0xFF2563EB),
+        textPrimary = Color(0xFF1F2937),
+        textSecondary = Color(0xFF4B5563),
+        textMuted = Color(0xFF6B7280),
+        chipUnselectedBg = Color(0xFFF2F2F7),
+        chipUnselectedText = Color(0xFF1F2937),
+        toggleOffBg = Color(0xFFE5E7EB),
+        toggleOffText = Color(0xFF4B5563),
+        sliderTrackBg = Color(0xFFE5E7EB),
+        sliderThumbBg = Color.White,
+        sliderThumbBorder = Color(0x14000000),
+        sliderActiveText = Color(0xFF3482FF),
+        sliderInactiveText = Color(0xFF4B5563),
+        info = Color(0xFF3482FF),
+        success = Color(0xFF15803D),
+        warn = Color(0xFFB45309),
+        error = Color(0xFFCF1322)
+    )
 }
 
 @Composable
@@ -1360,6 +1472,7 @@ private fun PrefToggleRow(
     checked: Boolean,
     onToggle: () -> Unit
 ) {
+    val palette = LocalMainPalette.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1371,18 +1484,18 @@ private fun PrefToggleRow(
         Text(
             text = label,
             fontSize = 13.sp,
-            color = Color(0xFF1F2937),
+            color = palette.textPrimary,
             modifier = Modifier.weight(1f).padding(end = 8.dp)
         )
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .background(if (checked) Color(0xFF3482FF) else Color(0xFFE5E7EB))
+                .background(if (checked) palette.accentFill else palette.toggleOffBg)
                 .padding(horizontal = 10.dp, vertical = 4.dp)
         ) {
             Text(
                 text = if (checked) "开" else "关",
-                color = if (checked) Color.White else Color(0xFF4B5563),
+                color = if (checked) Color.White else palette.toggleOffText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -1418,6 +1531,7 @@ private fun ThemeModeSlider(
     onSelectMode: (OverlayThemeMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalMainPalette.current
     val modes = OverlayThemeMode.entries
     val selectedIndex = modes.indexOf(selectedMode).coerceAtLeast(0)
     val currentMode by rememberUpdatedState(selectedMode)
@@ -1429,7 +1543,7 @@ private fun ThemeModeSlider(
             .fillMaxWidth()
             .height(36.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFFE5E7EB))
+            .background(palette.sliderTrackBg)
             .padding(3.dp)
     ) {
         val segmentWidth = maxWidth / modes.size
@@ -1516,8 +1630,8 @@ private fun ThemeModeSlider(
                     .width(segmentWidth)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(11.dp))
-                    .background(Color.White)
-                    .border(0.5.dp, Color(0x14000000), RoundedCornerShape(11.dp))
+                    .background(palette.sliderThumbBg)
+                    .border(0.5.dp, palette.sliderThumbBorder, RoundedCornerShape(11.dp))
             )
             Row(modifier = Modifier.fillMaxSize()) {
                 modes.forEachIndexed { idx, mode ->
@@ -1530,7 +1644,7 @@ private fun ThemeModeSlider(
                     ) {
                         Text(
                             text = mode.displayName,
-                            color = if (active) Color(0xFF3482FF) else Color(0xFF4B5563),
+                            color = if (active) palette.sliderActiveText else palette.sliderInactiveText,
                             fontSize = 12.sp,
                             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = 1
@@ -1549,17 +1663,18 @@ private fun SelectableChip(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val palette = LocalMainPalette.current
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
-            .background(if (selected) Color(0xFF3482FF) else Color(0xFFF2F2F7))
+            .background(if (selected) palette.accentFill else palette.chipUnselectedBg)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            color = if (selected) Color.White else Color(0xFF1F2937),
+            color = if (selected) Color.White else palette.chipUnselectedText,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium
         )
