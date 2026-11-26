@@ -11,8 +11,8 @@ android {
         applicationId = "com.scluzlep.searchcx"
         minSdk = 28
         targetSdk = 35
-        versionCode = System.getenv("SEARCHCX_VERSION_CODE")?.toIntOrNull() ?: 1003001
-        versionName = System.getenv("SEARCHCX_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.3.0"
+        versionCode = System.getenv("SEARCHCX_VERSION_CODE")?.toIntOrNull() ?: 1003002
+        versionName = System.getenv("SEARCHCX_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.3.1"
     }
 
     buildTypes {
